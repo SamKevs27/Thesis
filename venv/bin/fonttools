@@ -1,4 +1,4 @@
-#!/Users/samkev/Desktop/ThesisProject/venv/bin/python3.11
+#!/Users/samkev/Campus/Thesis/ThesisProject/venv/bin/python3.11
 import sys
 from fontTools.__main__ import main
 if __name__ == '__main__':
