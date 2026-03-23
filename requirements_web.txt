@@ -1,0 +1,7 @@
+flask==2.3.3
+opencv-python==4.8.0.76
+mediapipe==0.10.0
+numpy==1.24.3
+fastdtw==0.3.2
+scipy==1.11.2
+Werkzeug==2.3.7
