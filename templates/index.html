@@ -291,6 +291,47 @@
             }
         }
 
+        function drawPivotMarkers(ctx, landmarks, role, width, height) {
+            if (!landmarks || !landmarks.length) return;
+
+            const pivotIds = [
+                11, 12, // shoulders
+                13, 14, // elbows
+                15, 16, // wrists
+                23, 24, // hips
+                25, 26, // knees
+                27, 28  // ankles
+            ];
+
+            const ringColor = role === 'teacher' ? '#1d4ed8' : '#ea580c';
+            const fillColor = role === 'teacher' ? '#93c5fd' : '#fdba74';
+            const radius = role === 'teacher' ? 4 : 5;
+
+            ctx.save();
+            for (const idx of pivotIds) {
+                const lm = landmarks[idx];
+                if (!lm) continue;
+                if (typeof lm.visibility === 'number' && lm.visibility < 0.35) continue;
+
+                const x = lm.x * width;
+                const y = lm.y * height;
+
+                ctx.beginPath();
+                ctx.arc(x, y, radius + 2, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(255,255,255,0.8)';
+                ctx.fill();
+
+                ctx.beginPath();
+                ctx.arc(x, y, radius, 0, Math.PI * 2);
+                ctx.fillStyle = fillColor;
+                ctx.fill();
+                ctx.lineWidth = 1.5;
+                ctx.strokeStyle = ringColor;
+                ctx.stroke();
+            }
+            ctx.restore();
+        }
+
         async function startPoseOverlay(videoId, canvasId, options = {}) {
             const videoEl = document.getElementById(videoId);
             const canvasEl = document.getElementById(canvasId);
@@ -340,6 +381,7 @@
                     color: pointColor,
                     radius
                 });
+                drawPivotMarkers(ctx, results.poseLandmarks, role, canvasEl.width, canvasEl.height);
                 ctx.restore();
             });
 
@@ -424,10 +466,17 @@
                 if (syncing) return;
                 syncing = true;
                 const target = Math.max(0, (studentVideo.currentTime || 0) + delta);
-                if (Math.abs((teacherVideo.currentTime || 0) - target) > 0.08) {
+                const drift = (teacherVideo.currentTime || 0) - target;
+
+                if (Math.abs(drift) > 0.25) {
                     teacherVideo.currentTime = target;
+                    teacherVideo.playbackRate = studentVideo.playbackRate || 1;
+                } else {
+                    const baseRate = studentVideo.playbackRate || 1;
+                    const correction = Math.max(-0.08, Math.min(0.08, -drift * 0.6));
+                    teacherVideo.playbackRate = Math.max(0.8, Math.min(1.25, baseRate + correction));
                 }
-                teacherVideo.playbackRate = studentVideo.playbackRate || 1;
+
                 syncing = false;
             };
 
@@ -438,24 +487,45 @@
             const onPause = () => teacherVideo.pause();
             const onSeek = () => syncTeacherToStudent();
             const onRate = () => syncTeacherToStudent();
+            const onTeacherMeta = () => syncTeacherToStudent();
+
+            let syncTimerId = null;
+            const startSyncTimer = () => {
+                if (syncTimerId !== null) return;
+                syncTimerId = window.setInterval(syncTeacherToStudent, 120);
+            };
+            const stopSyncTimer = () => {
+                if (syncTimerId !== null) {
+                    window.clearInterval(syncTimerId);
+                    syncTimerId = null;
+                }
+            };
 
             studentVideo.addEventListener('play', onPlay);
             studentVideo.addEventListener('pause', onPause);
             studentVideo.addEventListener('seeking', onSeek);
             studentVideo.addEventListener('seeked', onSeek);
             studentVideo.addEventListener('ratechange', onRate);
-            studentVideo.addEventListener('timeupdate', onSeek);
+            teacherVideo.addEventListener('loadedmetadata', onTeacherMeta);
+
+            studentVideo.addEventListener('play', startSyncTimer);
+            studentVideo.addEventListener('pause', stopSyncTimer);
+            studentVideo.addEventListener('ended', stopSyncTimer);
 
             syncTeacherToStudent();
 
             syncPairSessions[key] = {
                 stop: () => {
+                    stopSyncTimer();
                     studentVideo.removeEventListener('play', onPlay);
                     studentVideo.removeEventListener('pause', onPause);
                     studentVideo.removeEventListener('seeking', onSeek);
                     studentVideo.removeEventListener('seeked', onSeek);
                     studentVideo.removeEventListener('ratechange', onRate);
-                    studentVideo.removeEventListener('timeupdate', onSeek);
+                    teacherVideo.removeEventListener('loadedmetadata', onTeacherMeta);
+                    studentVideo.removeEventListener('play', startSyncTimer);
+                    studentVideo.removeEventListener('pause', stopSyncTimer);
+                    studentVideo.removeEventListener('ended', stopSyncTimer);
                 }
             };
         }
