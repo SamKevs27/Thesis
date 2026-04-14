@@ -126,19 +126,60 @@ def allowed_file(filename):
     """Check if file extension is allowed"""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+import scipy.signal
+
+def smooth_pose_data(pose_data, window_length=9, polyorder=3):
+    """
+    Smooths an entire sequence of pose angles using a Savitzky-Golay filter.
+    """
+    if len(pose_data) < window_length:
+        window_length = len(pose_data) if len(pose_data) % 2 != 0 else len(pose_data) - 1
+        
+    if window_length <= polyorder:
+        return pose_data # Sequence too short to smooth safely
+
+    # Apply filter along the time axis
+    smoothed_data = scipy.signal.savgol_filter(pose_data, window_length=window_length, polyorder=polyorder, axis=0)
+    
+    return smoothed_data
+
 def calculate_angle(a, b, c):
-    """Calculate angle between three points"""
+    """
+    Calculate the 3D interior angle between three spatial points.
+    :param a: First point (e.g. Hip) [x, y, z]
+    :param b: Middle point (e.g. Knee) [x, y, z]
+    :param c: Last point (e.g. Ankle) [x, y, z]
+    :return: Angle in degrees (0 to 180)
+    """
     a = np.array(a)
     b = np.array(b)
     c = np.array(c)
     
-    radians = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
-    angle = np.abs(radians*180.0/np.pi)
+    # Create vectors meeting at point b
+    ba = a - b
+    bc = c - b
     
-    if angle > 180.0:
-        angle = 360 - angle
+    # Calculate the dot product
+    dot_prod = np.dot(ba, bc)
     
-    return int(angle)
+    # Calculate the magnitudes (norms) of the vectors
+    norm_ba = np.linalg.norm(ba)
+    norm_bc = np.linalg.norm(bc)
+    
+    # Avoid division by zero
+    if norm_ba == 0 or norm_bc == 0:
+        return 0.0
+        
+    # Calculate the cosine of the angle
+    cosine_angle = dot_prod / (norm_ba * norm_bc)
+    
+    # Clip to handle floating point inaccuracies before arccos
+    cosine_angle = np.clip(cosine_angle, -1.0, 1.0)
+    
+    # Calculate the angle in degrees
+    angle_deg = np.degrees(np.arccos(cosine_angle))
+    
+    return int(angle_deg)
 
 def extract_angles_from_video(video_path):
     """Extract dance angles from video and return per-frame timestamps.
@@ -156,12 +197,13 @@ def extract_angles_from_video(video_path):
     cap = cv2.VideoCapture(video_path)
 
     if not cap.isOpened():
-     return None, None, "Could not open video file"
+     return None, None, None, "Could not open video file"
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
     dance_data = []
     timestamps = []
+    landmarks_data = [] # New: store (x, y, visibility) for overlay
     raw_frame_index = 0
     prev_row = None   # last fully-computed row — used for fallback angles
 
@@ -199,9 +241,9 @@ def extract_angles_from_video(video_path):
           lm = results.pose_landmarks.landmark
           PL = mp_pose.PoseLandmark
 
-          # Convenience: grab [x,y] lists (only used when visibility check passes)
+          # Convenience: grab [x,y,z] lists (only used when visibility check passes)
           def xy(lm_id):
-              return [lm[lm_id.value].x, lm[lm_id.value].y]
+              return [lm[lm_id.value].x, lm[lm_id.value].y, lm[lm_id.value].z]
 
           l_sh = xy(PL.LEFT_SHOULDER);   r_sh = xy(PL.RIGHT_SHOULDER)
           l_el = xy(PL.LEFT_ELBOW);      r_el = xy(PL.RIGHT_ELBOW)
@@ -212,8 +254,8 @@ def extract_angles_from_video(video_path):
           l_idx = xy(PL.LEFT_INDEX);     r_idx = xy(PL.RIGHT_INDEX)
           l_ft  = xy(PL.LEFT_FOOT_INDEX); r_ft = xy(PL.RIGHT_FOOT_INDEX)
           nose  = xy(PL.NOSE)
-          mid_sh = [(l_sh[0]+r_sh[0])/2, (l_sh[1]+r_sh[1])/2]
-          mid_hi = [(l_hi[0]+r_hi[0])/2, (l_hi[1]+r_hi[1])/2]
+          mid_sh = [(l_sh[0]+r_sh[0])/2, (l_sh[1]+r_sh[1])/2, (l_sh[2]+r_sh[2])/2]
+          mid_hi = [(l_hi[0]+r_hi[0])/2, (l_hi[1]+r_hi[1])/2, (l_hi[2]+r_hi[2])/2]
 
           # landmark id shortcuts for readability
           LS = PL.LEFT_SHOULDER.value;   RS = PL.RIGHT_SHOULDER.value
@@ -257,6 +299,9 @@ def extract_angles_from_video(video_path):
 
           prev_row = row
           dance_data.append(row)
+          # Save landmark coordinates for overlay
+          lm_list = [{'x': l.x, 'y': l.y, 'v': l.visibility} for l in lm]
+          landmarks_data.append(lm_list)
           timestamps.append(raw_frame_index / float(fps))
 
          except Exception:
@@ -266,9 +311,12 @@ def extract_angles_from_video(video_path):
     cap.release()
 
     if not dance_data:
-     return None, None, "No pose detected in video"
+     return None, None, None, "No pose detected in video"
 
-    return np.array(dance_data), np.array(timestamps), None
+    # Smooth the extracted angle data using the Savitzky-Golay offline filter
+    smoothed_data = smooth_pose_data(np.array(dance_data))
+
+    return smoothed_data, np.array(timestamps), landmarks_data, None
 
 def load_teacher_data(filepath='dance_data.csv'):
     """Load teacher reference data"""
@@ -429,27 +477,112 @@ def align_pose_data(teacher_data, teacher_ts, student_data, student_ts, offset_s
     return teacher_data, teacher_ts, student_data, student_ts, t_trim_sec, s_trim_sec
 
 
-def calculate_score(student_data, teacher_data, max_distance=500):
-    """Calculate similarity score"""
-    try:
-        # fastdtw returns (distance, path). Normalize by path length so
-        # score is independent of sequence length.
-        distance, path = fastdtw(student_data, teacher_data, dist=euclidean)
-        path_len = len(path) if path is not None else max(len(student_data), len(teacher_data))
+class BiomechanicalScorer:
+    def __init__(self):
+        # 13 Joints: [L_Elb, R_Elb, L_Sho, R_Sho, L_Wri, R_Wri, L_Hip, R_Hip, L_Kne, R_Kne, L_Ank, R_Ank, Spine]
+        
+        # 1. Biomechanical Weights (Core/Hips/Knees > Shoulders > Extemities/Wrists/Ankles)
+        self.weights = np.array([
+            0.8, 0.8,  # Elbows
+            1.0, 1.0,  # Shoulders
+            0.3, 0.3,  # Wrists (prone to noise, less critical to core form)
+            1.2, 1.2,  # Hips (core)
+            1.2, 1.2,  # Knees (foundation)
+            0.3, 0.3,  # Ankles 
+            1.5        # Spine (posture is paramount)
+        ])
+        self.weights = self.weights / np.sum(self.weights) # Normalize to sum=1
 
-        if path_len == 0:
-            return 0
+        # 2. Biological Maximum Range of Motion (Max possible error per joint in degrees)
+        self.max_rom = np.array([
+            150, 150,  # Elbows
+            180, 180,  # Shoulders
+            120, 120,  # Wrists
+            160, 160,  # Hips
+            160, 160,  # Knees
+            90,  90,   # Ankles
+            90         # Spine 
+        ])
 
-        avg_distance = distance / path_len
+    def calculate_temporal_stability(self, series):
+        """Calculate motion smoothness (mean absolute first derivative)."""
+        if len(series) < 2: return np.zeros(series.shape[1])
+        velocities = np.abs(np.diff(series, axis=0))
+        return np.mean(velocities, axis=0)
+        
+    def weighted_dtw_distance(self, s1, s2):
+        """Custom distance metric for FastDTW incorporating joint weights & ROM normalization."""
+        # Normalize vectors by Biological ROM
+        norm_s1, norm_s2 = s1 / self.max_rom, s2 / self.max_rom
+        
+        # Weighted Euclidean
+        diff = norm_s1 - norm_s2
+        weighted_sq_diff = np.sum((diff ** 2) * self.weights)
+        return np.sqrt(weighted_sq_diff)
+        
+    def evaluate(self, student_data, teacher_data):
+        try:
+            # Ensure inputs are numpy arrays
+            student_data = np.array(student_data)
+            teacher_data = np.array(teacher_data)
+            
+            # Guard rails
+            if len(student_data) == 0 or len(teacher_data) == 0:
+                return {"overall_score": 0, "pose_score": 0, "jitter_penalty": 0, "regional": {"arms": 0, "legs": 0, "torso": 0}}
 
-        # Theoretical maximum per-frame euclidean distance between two 13-angle
-        # vectors where each angle ranges 0-180 is 180 * sqrt(13).
-        max_per_frame = 180 * (13 ** 0.5)
+            # --- A. DTW Alignment with Biomechanical Weights ---
+            # fastdtw returns (distance, path)
+            distance, path = fastdtw(student_data, teacher_data, dist=self.weighted_dtw_distance)
+            path_len = len(path)
+            
+            # Normalize distance (average weighted error across the path)
+            # In our normalized scale, worst-case distance per frame is ~1.0
+            avg_distance = (distance / path_len) if path_len > 0 else 1.0
+            
+            # Pose accuracy converts distance to a 0-100 score
+            pose_score = max(0, min(100, (1 - avg_distance) * 100))
+            
+            # --- B. Temporal Stability Penalty ---
+            # Calculate smoothness: if student exhibits massive jitter vs teacher
+            student_smoothness = self.calculate_temporal_stability(student_data)
+            teacher_smoothness = self.calculate_temporal_stability(teacher_data)
+            
+            # Compare weighted jitter
+            jitter_diff = np.maximum(0, student_smoothness - teacher_smoothness) # only penalize excess jitter
+            weighted_jitter = np.sum((jitter_diff / self.max_rom) * self.weights)
+            
+            jitter_penalty = min(15, weighted_jitter * 50) # Cap penalty at 15 points
+            
+            # --- C. Compute Regional Breakdown ---
+            # Map out which columns belong to which region dynamically based on the path
+            s_aligned = np.array([student_data[i] for i, j in path])
+            t_aligned = np.array([teacher_data[j] for i, j in path])
+            
+            abs_errors = np.abs(s_aligned - t_aligned) / self.max_rom
+            mean_errors = np.mean(abs_errors, axis=0) # Shape: (13,)
+            
+            # Convert regional errors to 100-scale
+            def region_score(indices):
+                err = np.mean([mean_errors[i] for i in indices])
+                return max(0, min(100, (1 - err) * 100))
 
-        score = max(0, min(100, (1 - (avg_distance / max_per_frame)) * 100))
-        return round(score, 2)
-    except Exception:
-        return 0
+            regional_scores = {
+                "arms": region_score([0, 1, 2, 3, 4, 5]),
+                "legs": region_score([6, 7, 8, 9, 10, 11]),
+                "torso": region_score([12])
+            }
+
+            # --- D. Final Calculation ---
+            final_score = max(0, min(100, pose_score - jitter_penalty))
+            
+            return {
+                "overall_score": round(final_score, 2),
+                "pose_score": round(pose_score, 2),
+                "jitter_penalty": round(jitter_penalty, 2),
+                "regional": {k: round(v, 2) for k, v in regional_scores.items()}
+            }
+        except Exception:
+            return {"overall_score": 0, "pose_score": 0, "jitter_penalty": 0, "regional": {"arms": 0, "legs": 0, "torso": 0}}
 
 
 def generate_detailed_feedback(student_data, student_ts, teacher_data, teacher_ts=None, threshold_deg=25, top_n=None):
@@ -575,106 +708,75 @@ def _friendly_message(entry):
     s_ang = entry.get('student_angle', 0.0)
     t_ang = entry.get('teacher_angle', 0.0)
 
-    names = {
-        'L_Elbow': 'left elbow', 'R_Elbow': 'right elbow',
-        'L_Shoulder': 'left shoulder', 'R_Shoulder': 'right shoulder',
-        'L_Wrist': 'left wrist', 'R_Wrist': 'right wrist',
-        'L_Hip': 'left hip', 'R_Hip': 'right hip',
-        'L_Knee': 'left knee', 'R_Knee': 'right knee',
-        'L_Ankle': 'left ankle', 'R_Ankle': 'right ankle',
-        'Spine': 'posture/spine'
-    }
+    # Clean up joint name for display
+    joint_name = joint.lower().replace('_', ' ')
 
-    joint_name = names.get(joint, joint.lower())
+    # Core Logic: If Teacher Angle > Student Angle, student needs to INCREASE their angle
+    increase = t_ang > s_ang
 
-    # Choose verb by joint type
     if 'knee' in joint_name or 'elbow' in joint_name:
-        verb = 'bend' if t_ang > s_ang else 'straighten'
-    elif 'wrist' in joint_name or 'ankle' in joint_name:
-        verb = 'flex' if t_ang > s_ang else 'extend'
-    elif 'posture' in joint_name or 'spine' in joint_name:
-        verb = 'lean forward' if t_ang < s_ang else 'stand taller'
+        verb = 'straighten' if increase else 'bend'
+    elif 'shoulder' in joint_name:
+        verb = 'raise' if increase else 'lower'
+    elif 'hip' in joint_name:
+        verb = 'stand straighter' if increase else 'bend deeper at the waist/hips'
+    elif 'wrist' in joint_name:
+        verb = 'straighten/extend' if increase else 'bend/flex'
+    elif 'ankle' in joint_name:
+        verb = 'point your toes more' if increase else 'flex your foot upward'
+    elif 'spine' in joint_name or 'posture' in joint_name:
+        verb = 'stand taller' if increase else 'lean forward'
     else:
-        verb = 'raise' if t_ang > s_ang else 'lower'
+        verb = 'increase angle of' if increase else 'decrease angle of'
 
-    return f"At {start:.1f}s — {verb.capitalize()} your {joint_name} by about {abs(avg_diff):.1f}° (you: {s_ang:.1f}°, target: {t_ang:.1f}°)."
+    return f"At {start:.1f}s — {verb.capitalize()} your {joint_name} by about {abs(avg_diff):.0f}° (you: {s_ang:.0f}°, target: {t_ang:.0f}°)."
 
 
 def get_semantic_feedback(angle_name, student_angle, teacher_angle):
-    """Return semantic 'Dancer Language' feedback for a single joint.
-
-    Rules (from prompt):
-    - Elbows/Knees: if student > teacher by >15° -> 'Straighten your [Body Part]'.
-      if student < teacher by >15° -> 'Bend your [Body Part] more.'
-    - Shoulders/Hips: if student < teacher by >20° -> 'Lift your [Body Part] higher.'
-      if student > teacher by >20° -> 'Drop your [Body Part] lower.'
-    - If abs diff < 10° -> 'Perfect [Body Part]!'
-    """
-    # Map angle_name to readable body part
-    names = {
-        'L_Elbow': 'left elbow', 'R_Elbow': 'right elbow',
-        'L_Shoulder': 'left shoulder', 'R_Shoulder': 'right shoulder',
-        'L_Wrist': 'left wrist', 'R_Wrist': 'right wrist',
-        'L_Hip': 'left hip', 'R_Hip': 'right hip',
-        'L_Knee': 'left knee', 'R_Knee': 'right knee',
-        'L_Ankle': 'left ankle', 'R_Ankle': 'right ankle',
-        'Spine': 'posture'
-    }
-    part = names.get(angle_name, angle_name.lower())
-
+    part = angle_name.lower().replace('_', ' ')
+    
+    # diff = Student - Teacher
+    # If diff < 0 (Negative), Student is smaller than Teacher -> Needs to INCREASE angle
+    # If diff > 0 (Positive), Student is larger than Teacher -> Needs to DECREASE angle
     diff = student_angle - teacher_angle
     abs_diff = abs(diff)
-
-    # elbows / knees
-    if 'elbow' in part or 'knee' in part:
-        if diff > 15:
-            return f"Straighten your {part}."
-        if diff < -15:
-            return f"Bend your {part} more."
-
-    # shoulders / hips
-    if 'shoulder' in part or 'hip' in part:
-        if diff < -20:
-            return f"Lift your {part} higher."
-        if diff > 20:
-            return f"Drop your {part} lower."
-
-    # wrist bend
-    if 'wrist' in part:
-        if diff > 15:
-            return f"Extend your {part} more."
-        if diff < -15:
-            return f"Flex your {part} more."
-
-    # ankle / foot
-    if 'ankle' in part:
-        if diff > 15:
-            return f"Point your {part} more (extend the foot)."
-        if diff < -15:
-            return f"Flex your {part} upward more."
-
-    # spine / posture
-    if 'posture' in part:
-        if diff > 15:
-            return "Stand taller — your torso is leaning too far."
-        if diff < -15:
-            return "Lean forward slightly to match the teacher's posture."
 
     if abs_diff < 10:
         return f"Perfect {part}!"
 
-    # fallback
-    if diff > 0:
-        return f"Slightly adjust your {part} outward."
-    elif diff < 0:
-        return f"Slightly adjust your {part} inward."
-    else:
-        return f"Good {part}."
+    if 'elbow' in part or 'knee' in part:
+        if diff < -15: return f"Straighten your {part}."
+        if diff > 15:  return f"Bend your {part} more."
+
+    elif 'shoulder' in part:
+        if diff < -15: return f"Raise your {part} higher."
+        if diff > 15:  return f"Lower your {part}."
+
+    elif 'hip' in part:
+        if diff < -15: return f"Extend your hips / stand up straighter."
+        if diff > 15:  return f"Bend deeper at the hips / squat lower."
+
+    elif 'wrist' in part:
+        if diff < -15: return f"Extend/straighten your {part} more."
+        if diff > 15:  return f"Flex/bend your {part} more."
+
+    elif 'ankle' in part:
+        if diff < -15: return f"Point your toes more (extend {part})."
+        if diff > 15:  return f"Flex your foot upward more."
+
+    elif 'spine' in part or 'posture' in part:
+        if diff < -15: return "Stand taller — straighten your back."
+        if diff > 15:  return "Lean your torso forward more."
+
+    # Fallback
+    if diff < 0: return f"Open up / increase the angle of your {part}."
+    else:        return f"Close / decrease the angle of your {part}."
+
 
 
 def compose_side_by_side(teacher_path, student_path, out_path,
                          teacher_start=0.0, student_start=0.0, duration=None,
-                         joint_label=None):
+                         joint_label=None, fast_mode=False):
     """Produce a side-by-side annotated MP4 using OpenCV frame-by-frame rendering.
 
     For per-segment clips:
@@ -813,44 +915,45 @@ def compose_side_by_side(teacher_path, student_path, out_path,
         s_cap.release()
         return os.path.exists(out_path) and os.path.getsize(out_path) > 0
 
-    try:
-        if _annotate_and_write():
-            # Re-mux with FFmpeg to ensure proper H.264 in a browser-compatible mp4
-            tmp_path = out_path + '.tmp.mp4'
-            try:
-                res = subprocess.run(
-                    ['ffmpeg', '-y', '-i', out_path,
-                     '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
-                     '-movflags', '+faststart', tmp_path],
-                    capture_output=True, timeout=120
-                )
-                if res.returncode == 0:
-                    os.replace(tmp_path, out_path)
-            except Exception:
-                pass  # keep the raw mp4v file; most modern browsers support it
-            return True
-    except Exception as e:
-        print(f"[compose] annotated write error: {e}")
+    if not fast_mode:
+        try:
+            if _annotate_and_write():
+                # Re-mux with FFmpeg to ensure proper H.264 in a browser-compatible mp4
+                tmp_path = out_path + '.tmp.mp4'
+                try:
+                    res = subprocess.run(
+                        ['ffmpeg', '-y', '-i', out_path,
+                         '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
+                         '-movflags', '+faststart', tmp_path],
+                        capture_output=True, timeout=120
+                    )
+                    if res.returncode == 0:
+                        os.replace(tmp_path, out_path)
+                except Exception:
+                    pass  # keep the raw mp4v file; most modern browsers support it
+                return True
+        except Exception as e:
+            print(f"[compose] annotated write error: {e}")
 
     # ── Plain FFmpeg fallback (no skeleton) ──────────────────────────────────
     try:
-        t_seek   = ['-ss', str(teacher_start)]
-        s_seek   = ['-ss', str(student_start)]
         dur_flag = ['-t', str(duration)] if duration else []
         filter_g = (
-            "[0:v]fps=30,scale=-2:480,setsar=1,format=yuv420p[tv];"
-            "[1:v]fps=30,scale=-2:480,setsar=1,format=yuv420p[sv];"
+            f"[0:v]trim=start={teacher_start},setpts=PTS-STARTPTS,fps=30,scale=-2:480,setsar=1,format=yuv420p[tv];"
+            f"[1:v]trim=start={student_start},setpts=PTS-STARTPTS,fps=30,scale=-2:480,setsar=1,format=yuv420p[sv];"
             "[tv][sv]hstack=inputs=2[out]"
         )
-        cmd = (['ffmpeg', '-y']
-               + t_seek + ['-i', teacher_path]
-               + s_seek + ['-i', student_path]
+        cmd = (['ffmpeg', '-y',
+                '-i', teacher_path,
+                '-i', student_path]
                + dur_flag
                + ['-filter_complex', filter_g,
                   '-map', '[out]',
                   '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
                   '-movflags', '+faststart', '-an', out_path])
         result = subprocess.run(cmd, capture_output=True, timeout=120)
+        if result.returncode != 0:
+            print("[compose] FFmpeg Failed:", result.stderr.decode('utf-8', errors='replace'))
         return result.returncode == 0
     except Exception as e:
         print(f"[compose] FFmpeg fallback error: {e}")
@@ -975,7 +1078,7 @@ def upload_teacher():
         file.save(filepath)
 
         # Extract angles and timestamps from saved teacher video
-        dance_data, timestamps, error = extract_angles_from_video(filepath)
+        dance_data, timestamps, landmarks_data, error = extract_angles_from_video(filepath)
 
         if error:
             os.remove(filepath)
@@ -990,6 +1093,11 @@ def upload_teacher():
                            'L_Ankle', 'R_Ankle', 'Spine'])
             writer.writerows(dance_data)
 
+        # Save teacher landmarks
+        import json
+        with open(os.path.join(app.config['UPLOAD_FOLDER'], 'teacher_landmarks.json'), 'w') as lf:
+            json.dump(landmarks_data, lf)
+
         # Save teacher timestamps for later thumbnail extraction
         ts_path = os.path.join(app.config['UPLOAD_FOLDER'], 'teacher_timestamps.npy')
         try:
@@ -1003,6 +1111,8 @@ def upload_teacher():
             os.makedirs(static_videos, exist_ok=True)
             teacher_static_path = os.path.join(static_videos, 'teacher_reference.mp4')
             shutil.copy2(filepath, teacher_static_path)
+            shutil.copy2(os.path.join(app.config['UPLOAD_FOLDER'], 'teacher_landmarks.json'), 
+                         os.path.join(static_videos, 'teacher_landmarks.json'))
         except Exception:
             teacher_static_path = None
         # Keep original teacher file in uploads as well
@@ -1045,7 +1155,7 @@ def upload_student():
         file.save(filepath)
         
         # Extract angles from video (also get timestamps)
-        student_data, student_ts, error = extract_angles_from_video(filepath)
+        student_data, student_ts, landmarks_data, error = extract_angles_from_video(filepath)
 
         if error:
             os.remove(filepath)
@@ -1081,6 +1191,11 @@ def upload_student():
                            'L_Ankle', 'R_Ankle', 'Spine'])
             writer.writerows(student_data)
 
+        # Also save student landmarks
+        import json
+        with open(os.path.join(app.config['UPLOAD_FOLDER'], f"student_{student_name}_landmarks.json"), 'w') as f:
+            json.dump(landmarks_data, f)
+
         # Copy student video into static folder for in-page playback (persistent)
         try:
             static_videos = os.path.join(app.static_folder, 'uploads_videos')
@@ -1088,16 +1203,20 @@ def upload_student():
             student_static_name = f"student_{student_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
             student_static_path = os.path.join(static_videos, student_static_name)
             shutil.copy2(filepath, student_static_path)
+            shutil.copy2(os.path.join(app.config['UPLOAD_FOLDER'], f"student_{student_name}_landmarks.json"), 
+                         os.path.join(static_videos, f"student_{student_name}_landmarks.json"))
             student_video_url = f"/static/uploads_videos/{student_static_name}"
         except Exception:
             student_video_url = None
         
-        # Calculate scores
-        # Arms cols 0-5, Legs cols 6-11, Torso col 12
-        overall_score = calculate_score(student_data, teacher_data)
-        arm_score = calculate_score(student_data[:, 0:6], teacher_data[:, 0:6])
-        leg_score = calculate_score(student_data[:, 6:12], teacher_data[:, 6:12])
-        torso_score = calculate_score(student_data[:, 12:13], teacher_data[:, 12:13])
+        # Calculate scores using the new BiomechanicalScorer
+        scorer = BiomechanicalScorer()
+        scoring_results = scorer.evaluate(student_data, teacher_data)
+        
+        overall_score = scoring_results['overall_score']
+        arm_score = scoring_results['regional']['arms']
+        leg_score = scoring_results['regional']['legs']
+        torso_score = scoring_results['regional']['torso']
 
         # Generate detailed feedback (time-stamped)
         detailed = generate_detailed_feedback(student_data, student_ts, teacher_data, teacher_ts=teacher_ts, threshold_deg=12)
@@ -1109,9 +1228,23 @@ def upload_student():
         else:
             detailed = save_feedback_thumbnails(filepath, detailed, student_name, teacher_video_path=None)
 
-        # Use original uploaded videos in the browser and draw skeleton overlays
-        # client-side in real-time (avoids expensive server-side clip rendering).
-        composed_full_url = None
+        # Render the aligned side-by-side video on the server
+        composed_name = f"composed_{student_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+        composed_path = os.path.join(app.static_folder, 'uploads_videos', composed_name)
+        
+        teacher_video_raw = os.path.join(app.config['UPLOAD_FOLDER'], 'teacher_reference.mp4')
+        if os.path.exists(teacher_video_raw):
+            success = compose_side_by_side(
+                teacher_video_raw, filepath, composed_path,
+                teacher_start=t_trim_sec, student_start=s_trim_sec, 
+                fast_mode=True
+            )
+            if success:
+                composed_full_url = f"/static/uploads_videos/{composed_name}"
+            else:
+                composed_full_url = None
+        else:
+            composed_full_url = None
 
         
         # Determine feedback
@@ -1163,6 +1296,8 @@ def upload_student():
             teacher_static_url = None
         results['teacher_video'] = teacher_static_url
         results['student_video'] = student_video_url if 'student_video_url' not in locals() else student_video_url
+        results['teacher_landmarks_url'] = "/static/uploads_videos/teacher_landmarks.json"
+        results['student_landmarks_url'] = f"/static/uploads_videos/student_{student_name}_landmarks.json"
 
         # Produce prioritized semantic feedback for Arms, Legs, Torso
         try:
