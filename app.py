@@ -42,6 +42,57 @@ print(f"✓ Static folder: {os.path.abspath(app.static_folder)}")
 # MediaPipe setup
 mp_pose = mp.solutions.pose
 
+# =====================================================================
+# ONE EURO FILTER — real-time per-joint jitter removal
+# Applied inside extract_angles_from_video before Savitzky-Golay.
+# Adaptive cutoff: slow movements get heavy smoothing, fast hits stay sharp.
+# Reference: Casiez et al., "1€ Filter: A Simple Speed-based Low-pass Filter"
+# =====================================================================
+import math
+
+class OneEuroFilter:
+    """Adaptive low-pass filter for 1-D or N-D signals.
+
+    Parameters
+    ----------
+    t0          : float  — initial timestamp (seconds)
+    x0          : array  — initial value (scalar or numpy array)
+    min_cutoff  : float  — minimum cutoff frequency (Hz).  Lower = smoother at rest.
+    beta        : float  — speed coefficient.  Higher = less lag during fast moves.
+    d_cutoff    : float  — cutoff for the derivative (fixed).
+    """
+    def __init__(self, t0, x0, dx0=0.0, min_cutoff=0.5, beta=0.01, d_cutoff=1.0):
+        self.min_cutoff = float(min_cutoff)
+        self.beta       = float(beta)
+        self.d_cutoff   = float(d_cutoff)
+        self.x_prev     = np.array(x0, dtype=float)
+        self.dx_prev    = np.array(dx0 if np.ndim(dx0) > 0 else
+                                   np.zeros_like(self.x_prev), dtype=float)
+        self.t_prev     = float(t0)
+
+    def _alpha(self, t_e, cutoff):
+        r = 2.0 * math.pi * cutoff * t_e
+        return r / (r + 1.0)
+
+    def __call__(self, t, x):
+        x = np.array(x, dtype=float)
+        t_e = t - self.t_prev
+        if t_e <= 0:
+            return x
+
+        a_d    = self._alpha(t_e, self.d_cutoff)
+        dx     = (x - self.x_prev) / t_e
+        dx_hat = a_d * dx + (1.0 - a_d) * self.dx_prev
+
+        cutoff = self.min_cutoff + self.beta * float(np.linalg.norm(dx_hat))
+        a      = self._alpha(t_e, cutoff)
+        x_hat  = a * x + (1.0 - a) * self.x_prev
+
+        self.x_prev  = x_hat
+        self.dx_prev = dx_hat
+        self.t_prev  = t
+        return x_hat
+
 # ── Pose-highlight helpers ──────────────────────────────────────────────────
 # Maps our angle joint names → the MediaPipe landmark IDs that define each joint.
 _PL = mp_pose.PoseLandmark
@@ -207,6 +258,22 @@ def extract_angles_from_video(video_path):
     raw_frame_index = 0
     prev_row = None   # last fully-computed row — used for fallback angles
 
+    # OneEuroFilter state — one filter per MediaPipe landmark (for x,y,z coords)
+    # min_cutoff=0.5 Hz keeps slow grooves smooth; beta=0.01 preserves sharp hits
+    _euro_filters: dict = {}
+
+    def get_smoothed_xyz(lm, lm_id_enum, current_time):
+        """Return 1€-filtered [x, y, z] for a single landmark."""
+        raw_xyz = np.array([lm[lm_id_enum.value].x,
+                            lm[lm_id_enum.value].y,
+                            lm[lm_id_enum.value].z], dtype=float)
+        key = lm_id_enum.value
+        if key not in _euro_filters:
+            _euro_filters[key] = OneEuroFilter(t0=current_time, x0=raw_xyz,
+                                               min_cutoff=0.5, beta=0.01)
+            return raw_xyz
+        return _euro_filters[key](t=current_time, x=raw_xyz)
+
     def vis_ok(lm, *ids):
         """Return True if every landmark id in ids has visibility >= VIS_THRESHOLD."""
         return all(lm[i].visibility >= VIS_THRESHOLD for i in ids)
@@ -241,19 +308,20 @@ def extract_angles_from_video(video_path):
           lm = results.pose_landmarks.landmark
           PL = mp_pose.PoseLandmark
 
-          # Convenience: grab [x,y,z] lists (only used when visibility check passes)
-          def xy(lm_id):
-              return [lm[lm_id.value].x, lm[lm_id.value].y, lm[lm_id.value].z]
+          # Grab 1€-filtered [x,y,z] coordinates — jitter removed per joint
+          current_time = raw_frame_index / float(fps)
+          def fxy(lm_id_enum):
+              return get_smoothed_xyz(lm, lm_id_enum, current_time).tolist()
 
-          l_sh = xy(PL.LEFT_SHOULDER);   r_sh = xy(PL.RIGHT_SHOULDER)
-          l_el = xy(PL.LEFT_ELBOW);      r_el = xy(PL.RIGHT_ELBOW)
-          l_wr = xy(PL.LEFT_WRIST);      r_wr = xy(PL.RIGHT_WRIST)
-          l_hi = xy(PL.LEFT_HIP);        r_hi = xy(PL.RIGHT_HIP)
-          l_kn = xy(PL.LEFT_KNEE);       r_kn = xy(PL.RIGHT_KNEE)
-          l_an = xy(PL.LEFT_ANKLE);      r_an = xy(PL.RIGHT_ANKLE)
-          l_idx = xy(PL.LEFT_INDEX);     r_idx = xy(PL.RIGHT_INDEX)
-          l_ft  = xy(PL.LEFT_FOOT_INDEX); r_ft = xy(PL.RIGHT_FOOT_INDEX)
-          nose  = xy(PL.NOSE)
+          l_sh = fxy(PL.LEFT_SHOULDER);   r_sh = fxy(PL.RIGHT_SHOULDER)
+          l_el = fxy(PL.LEFT_ELBOW);      r_el = fxy(PL.RIGHT_ELBOW)
+          l_wr = fxy(PL.LEFT_WRIST);      r_wr = fxy(PL.RIGHT_WRIST)
+          l_hi = fxy(PL.LEFT_HIP);        r_hi = fxy(PL.RIGHT_HIP)
+          l_kn = fxy(PL.LEFT_KNEE);       r_kn = fxy(PL.RIGHT_KNEE)
+          l_an = fxy(PL.LEFT_ANKLE);      r_an = fxy(PL.RIGHT_ANKLE)
+          l_idx = fxy(PL.LEFT_INDEX);     r_idx = fxy(PL.RIGHT_INDEX)
+          l_ft  = fxy(PL.LEFT_FOOT_INDEX); r_ft = fxy(PL.RIGHT_FOOT_INDEX)
+          nose  = fxy(PL.NOSE)
           mid_sh = [(l_sh[0]+r_sh[0])/2, (l_sh[1]+r_sh[1])/2, (l_sh[2]+r_sh[2])/2]
           mid_hi = [(l_hi[0]+r_hi[0])/2, (l_hi[1]+r_hi[1])/2, (l_hi[2]+r_hi[2])/2]
 
@@ -477,226 +545,910 @@ def align_pose_data(teacher_data, teacher_ts, student_data, student_ts, offset_s
     return teacher_data, teacher_ts, student_data, student_ts, t_trim_sec, s_trim_sec
 
 
-class BiomechanicalScorer:
+def extract_beat_times(video_path: str, sr: int = 22050) -> np.ndarray:
+    """Extract beat timestamps (in seconds) from a video's audio track using onset detection.
+
+    Strategy:
+      1. Extract mono audio via ffmpeg.
+      2. Compute a log-power onset strength envelope.
+      3. Use dynamic-threshold peak picking to find beat/hit moments.
+
+    Returns an array of beat times in seconds, or empty array on failure.
+    """
+    tmp_wav = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+            tmp_wav = f.name
+
+        cmd = [
+            'ffmpeg', '-y', '-i', video_path,
+            '-vn', '-acodec', 'pcm_s16le',
+            '-ar', str(sr), '-ac', '1',
+            '-t', '300',  # cap at 5 min
+            tmp_wav
+        ]
+        res = subprocess.run(cmd, capture_output=True, timeout=60)
+        if res.returncode != 0:
+            return np.array([])
+
+        _, sig = wavfile.read(tmp_wav)
+        sig = sig.astype(np.float32) / (np.iinfo(np.int16).max + 1)
+
+        # Frame-based onset envelope: log RMS energy per 512-sample hop
+        frame_len = 1024
+        hop = 512
+        n_frames = (len(sig) - frame_len) // hop
+        if n_frames < 4:
+            return np.array([])
+
+        envelope = np.array([
+            np.sqrt(np.mean(sig[i*hop: i*hop + frame_len] ** 2))
+            for i in range(n_frames)
+        ])
+        # Log-compress to make soft and loud beats comparable
+        envelope = np.log1p(envelope * 100)
+
+        # First-order difference (onset strength)
+        onset_strength = np.maximum(0, np.diff(envelope))
+
+        # Dynamic threshold: median + 1.5 * std within a 1-second rolling window
+        frame_sr = sr / hop   # frames per second
+        win = max(1, int(frame_sr))
+        thresholds = np.array([
+            np.median(onset_strength[max(0, i-win): i+win]) +
+            1.5 * (onset_strength[max(0, i-win): i+win].std() + 1e-6)
+            for i in range(len(onset_strength))
+        ])
+
+        # Pick peaks above threshold with minimum 0.15 s separation
+        min_sep = max(1, int(0.15 * frame_sr))
+        beat_frames = []
+        last = -min_sep
+        for i in range(len(onset_strength)):
+            if onset_strength[i] > thresholds[i] and (i - last) >= min_sep:
+                beat_frames.append(i)
+                last = i
+
+        beat_times = np.array(beat_frames) * (hop / sr)
+        return beat_times
+
+    except Exception as e:
+        print(f'[beats] extract_beat_times error: {e}')
+        return np.array([])
+    finally:
+        if tmp_wav and os.path.exists(tmp_wav):
+            try:
+                os.remove(tmp_wav)
+            except Exception:
+                pass
+
+
+def compute_joint_kinematics(pose_data: np.ndarray, timestamps: np.ndarray):
+    """Derive velocity and acceleration arrays from pose angle data.
+
+    velocity[t]     = |angle[t+1] - angle[t]| / dt   (deg/s per joint)
+    acceleration[t] = |velocity[t+1] - velocity[t]| / dt  (deg/s² per joint)
+
+    Returns (velocity, acceleration) both shape (N-2, 13).
+    If sequence is too short returns (None, None).
+    """
+    if len(pose_data) < 3 or len(timestamps) < 3:
+        return None, None
+
+    dt = np.diff(timestamps)
+    dt = np.where(dt < 1e-6, 1e-6, dt)  # guard against zero-dt
+
+    # Angular velocity: shape (N-1, 13)
+    velocity = np.abs(np.diff(pose_data, axis=0)) / dt[:, np.newaxis]
+
+    # Angular acceleration: shape (N-2, 13)
+    dt2 = dt[:-1]
+    acceleration = np.abs(np.diff(velocity, axis=0)) / dt2[:, np.newaxis]
+
+    return velocity, acceleration
+
+
+class MoveClassifier:
+    """
+    Classifies each frame (or segment) of a pose sequence into a Hip Hop
+    move archetype, then returns a joint-weight mask so only the relevant
+    joints are scored for that move.
+
+    Joint indices (13 total):
+      0  L_Elbow   1  R_Elbow
+      2  L_Shoulder 3 R_Shoulder
+      4  L_Wrist   5  R_Wrist
+      6  L_Hip     7  R_Hip
+      8  L_Knee    9  R_Knee
+      10 L_Ankle   11 R_Ankle
+      12 Spine
+
+    Move archetypes and the joints that MATTER for them:
+      bounce      — rhythmic up/down: hips, knees, spine only
+      arm_wave    — fluid arm propagation: elbows, shoulders, wrists
+      footwork    — foot/leg patterns: knees, ankles, hips
+      chest_pop   — chest isolation: spine, shoulders only
+      full_body   — everything counts (default / catch-all)
+      freeze      — static hold: all joints, extra weight on spine
+      groove      — subtle rock: hips, knees, spine (less strict than bounce)
+    """
+
+    # mask values: 1.0 = scored normally, 0.05 = nearly ignored, 0.0 = skip entirely
+    MOVE_MASKS: dict = {
+        # idx:        0     1     2     3     4     5     6     7     8     9    10    11    12
+        #          L_Elb R_Elb L_Sho R_Sho L_Wri R_Wri L_Hip R_Hip L_Kne R_Kne L_Ank R_Ank Spin
+        'bounce':     [0.05, 0.05, 0.05, 0.05, 0.00, 0.00, 1.20, 1.20, 1.20, 1.20, 0.05, 0.05, 1.50],
+        'groove':     [0.10, 0.10, 0.20, 0.20, 0.00, 0.00, 1.20, 1.20, 1.00, 1.00, 0.10, 0.10, 1.20],
+        'arm_wave':   [1.20, 1.20, 1.20, 1.20, 1.00, 1.00, 0.05, 0.05, 0.05, 0.05, 0.00, 0.00, 0.30],
+        'chest_pop':  [0.20, 0.20, 1.20, 1.20, 0.10, 0.10, 0.30, 0.30, 0.10, 0.10, 0.00, 0.00, 1.50],
+        'footwork':   [0.05, 0.05, 0.05, 0.05, 0.00, 0.00, 1.00, 1.00, 1.30, 1.30, 1.20, 1.20, 0.30],
+        'freeze':     [0.80, 0.80, 1.00, 1.00, 0.40, 0.40, 1.00, 1.00, 1.00, 1.00, 0.60, 0.60, 1.50],
+        'top_rock':   [0.80, 0.80, 1.00, 1.00, 0.50, 0.50, 1.20, 1.20, 0.60, 0.60, 0.10, 0.10, 1.20],
+        'body_roll':  [0.30, 0.30, 0.80, 0.80, 0.20, 0.20, 1.00, 1.00, 0.50, 0.50, 0.10, 0.10, 1.50],
+        'popping':    [1.00, 1.00, 1.20, 1.20, 0.80, 0.80, 0.80, 0.80, 0.60, 0.60, 0.30, 0.30, 1.20],
+        'locking':    [1.20, 1.20, 1.00, 1.00, 1.00, 1.00, 0.80, 0.80, 0.80, 0.80, 0.50, 0.50, 0.80],
+        'full_body':  [0.70, 0.70, 1.00, 1.00, 0.30, 0.30, 1.20, 1.20, 1.10, 1.10, 0.30, 0.30, 1.50],
+    }
+
+    # ── Per-move scoring profiles ─────────────────────────────────────────────
+    # Each profile defines:
+    #   pillar_weights  — how much Timing / Movement / Power contribute to overall score
+    #   focus_joints    — human-readable list of what's being judged (for UI)
+    #   display_name    — friendly label shown to the user
+    #   description     — one-line explanation of what the move emphasises
+    #   feedback_cues   — what good execution looks and feels like
+    MOVE_PROFILES: dict = {
+        'bounce': {
+            'display_name': 'Bounce',
+            'description':  'Rhythmic up-down motion driven by hips and knees',
+            'pillar_weights': {'timing': 0.45, 'movement': 0.30, 'power': 0.25},
+            'focus_joints':  ['Hips', 'Knees', 'Spine'],
+            'ignored_joints': ['Wrists', 'Ankles'],
+            'feedback_cues': 'Knees should absorb and rebound on every beat. '
+                             'Hips drive the bounce — spine follows naturally.',
+        },
+        'groove': {
+            'display_name': 'Groove',
+            'description':  'Subtle rhythmic sway — the foundation of all hip hop',
+            'pillar_weights': {'timing': 0.50, 'movement': 0.35, 'power': 0.15},
+            'focus_joints':  ['Hips', 'Knees', 'Spine'],
+            'ignored_joints': ['Wrists', 'Ankles'],
+            'feedback_cues': 'Movement should feel effortless and musical. '
+                             'Less is more — every micro-shift should land on the beat.',
+        },
+        'arm_wave': {
+            'display_name': 'Arm Wave',
+            'description':  'Fluid sequential wave propagating through the arm',
+            'pillar_weights': {'timing': 0.30, 'movement': 0.50, 'power': 0.20},
+            'focus_joints':  ['Shoulders', 'Elbows', 'Wrists'],
+            'ignored_joints': ['Knees', 'Ankles'],
+            'feedback_cues': 'Wave must pass through shoulder → elbow → wrist in sequence. '
+                             'Each joint isolates cleanly before passing to the next.',
+        },
+        'chest_pop': {
+            'display_name': 'Chest Pop',
+            'description':  'Sharp chest isolation — a core popping/locking technique',
+            'pillar_weights': {'timing': 0.35, 'movement': 0.30, 'power': 0.35},
+            'focus_joints':  ['Shoulders', 'Spine'],
+            'ignored_joints': ['Knees', 'Ankles', 'Wrists'],
+            'feedback_cues': 'Chest leads the hit — shoulders follow. '
+                             'Lower body stays still. Pop must be sharp, not gradual.',
+        },
+        'footwork': {
+            'display_name': 'Footwork',
+            'description':  'Fast foot and leg patterns — b-boy / house footwork',
+            'pillar_weights': {'timing': 0.40, 'movement': 0.35, 'power': 0.25},
+            'focus_joints':  ['Ankles', 'Knees', 'Hips'],
+            'ignored_joints': ['Wrists', 'Elbows'],
+            'feedback_cues': 'Foot placement must be precise and rhythmic. '
+                             'Weight transfers should be clean — no dragging.',
+        },
+        'freeze': {
+            'display_name': 'Freeze',
+            'description':  'Static hold — body locked in a pose with zero drift',
+            'pillar_weights': {'timing': 0.20, 'movement': 0.30, 'power': 0.50},
+            'focus_joints':  ['All joints'],
+            'ignored_joints': [],
+            'feedback_cues': 'Every joint must hold position. '
+                             'Any wobble or drift is penalised. Core and spine are critical.',
+        },
+        'top_rock': {
+            'display_name': 'Top Rock',
+            'description':  'Standing b-boy/b-girl entry steps — upper body + hip driven',
+            'pillar_weights': {'timing': 0.40, 'movement': 0.35, 'power': 0.25},
+            'focus_joints':  ['Hips', 'Shoulders', 'Elbows', 'Spine'],
+            'ignored_joints': ['Ankles', 'Wrists'],
+            'feedback_cues': 'Arms and hips must coordinate. '
+                             'Step rhythm drives the whole movement.',
+        },
+        'body_roll': {
+            'display_name': 'Body Roll',
+            'description':  'Sequential wave from chest through hips — fluid and continuous',
+            'pillar_weights': {'timing': 0.30, 'movement': 0.55, 'power': 0.15},
+            'focus_joints':  ['Spine', 'Hips', 'Shoulders'],
+            'ignored_joints': ['Ankles', 'Wrists'],
+            'feedback_cues': 'Motion must be sequential and smooth — no jerky segments. '
+                             'Spine is the conductor of the whole wave.',
+        },
+        'popping': {
+            'display_name': 'Popping',
+            'description':  'Muscle contractions creating sharp hits across the body',
+            'pillar_weights': {'timing': 0.35, 'movement': 0.25, 'power': 0.40},
+            'focus_joints':  ['Shoulders', 'Elbows', 'Hips', 'Spine'],
+            'ignored_joints': ['Ankles'],
+            'feedback_cues': 'Each pop is a sharp contraction then full release. '
+                             'No telegraphing — hit must be instant.',
+        },
+        'locking': {
+            'display_name': 'Locking',
+            'description':  'Exaggerated arm locks with funky rhythm and character',
+            'pillar_weights': {'timing': 0.40, 'movement': 0.30, 'power': 0.30},
+            'focus_joints':  ['Elbows', 'Wrists', 'Shoulders'],
+            'ignored_joints': ['Ankles'],
+            'feedback_cues': 'Lock must be crisp and held for exactly the right duration. '
+                             'Character and attitude are part of the execution.',
+        },
+        'full_body': {
+            'display_name': 'Full Routine',
+            'description':  'Complete routine — all joints scored by move context',
+            'pillar_weights': {'timing': 0.35, 'movement': 0.35, 'power': 0.30},
+            'focus_joints':  ['All joints'],
+            'ignored_joints': [],
+            'feedback_cues': 'Every part of the body is evaluated. '
+                             'Move classifier adapts weights automatically per section.',
+        },
+    }
+
+    # Normalised masks (each row sums to ~1 so scoring stays on same scale)
+    _NORM_MASKS: dict = {}
+
     def __init__(self):
-        # 13 Joints: [L_Elb, R_Elb, L_Sho, R_Sho, L_Wri, R_Wri, L_Hip, R_Hip, L_Kne, R_Kne, L_Ank, R_Ank, Spine]
-        
-        # 1. Biomechanical Weights (Core/Hips/Knees > Shoulders > Extemities/Wrists/Ankles)
-        self.weights = np.array([
-            0.8, 0.8,  # Elbows
-            1.0, 1.0,  # Shoulders
-            0.3, 0.3,  # Wrists (prone to noise, less critical to core form)
-            1.2, 1.2,  # Hips (core)
-            1.2, 1.2,  # Knees (foundation)
-            0.3, 0.3,  # Ankles 
-            1.5        # Spine (posture is paramount)
-        ])
-        self.weights = self.weights / np.sum(self.weights) # Normalize to sum=1
+        for name, raw in self.MOVE_MASKS.items():
+            arr = np.array(raw, dtype=float)
+            total = arr.sum()
+            self._NORM_MASKS[name] = arr / total if total > 1e-9 else arr
 
-        # 2. Biological Maximum Range of Motion (Max possible error per joint in degrees)
-        self.max_rom = np.array([
-            150, 150,  # Elbows
-            180, 180,  # Shoulders
-            120, 120,  # Wrists
-            160, 160,  # Hips
-            160, 160,  # Knees
-            90,  90,   # Ankles
-            90         # Spine 
-        ])
+    # ── Heuristic classifier ───────────────────────────────────────────────────
 
-    def calculate_temporal_stability(self, series):
-        """Calculate motion smoothness (mean absolute first derivative)."""
-        if len(series) < 2: return np.zeros(series.shape[1])
-        velocities = np.abs(np.diff(series, axis=0))
-        return np.mean(velocities, axis=0)
-        
-    def weighted_dtw_distance(self, s1, s2):
-        """Custom distance metric for FastDTW incorporating joint weights & ROM normalization."""
-        # Normalize vectors by Biological ROM
-        norm_s1, norm_s2 = s1 / self.max_rom, s2 / self.max_rom
-        
-        # Weighted Euclidean
-        diff = norm_s1 - norm_s2
-        weighted_sq_diff = np.sum((diff ** 2) * self.weights)
-        return np.sqrt(weighted_sq_diff)
-        
-    def evaluate(self, student_data, teacher_data):
+    def classify_segment(self, vel_segment: np.ndarray) -> str:
+        """
+        Classify a short velocity segment (shape N×13) into a move archetype.
+
+        Heuristic rules derived from Hip Hop biomechanics:
+          - bounce:    high knee/hip velocity, low arm velocity, oscillatory pattern
+          - arm_wave:  high elbow/shoulder/wrist velocity, low leg velocity
+          - chest_pop: high shoulder+spine velocity, moderate elbow, low legs
+          - footwork:  high ankle/knee velocity, low arm velocity
+          - freeze:    near-zero velocity everywhere
+          - groove:    moderate hip/knee, low arms — less explosive than bounce
+          - full_body: everything above average
+        """
+        if vel_segment is None or len(vel_segment) < 2:
+            return 'full_body'
+
+        mean_vel = vel_segment.mean(axis=0)   # shape (13,)
+
+        arm_vel   = mean_vel[[0,1,2,3,4,5]].mean()    # elbows, shoulders, wrists
+        leg_vel   = mean_vel[[6,7,8,9,10,11]].mean()  # hips, knees, ankles
+        hip_vel   = mean_vel[[6,7]].mean()
+        knee_vel  = mean_vel[[8,9]].mean()
+        ankle_vel = mean_vel[[10,11]].mean()
+        sho_vel   = mean_vel[[2,3]].mean()
+        spine_vel = mean_vel[12]
+        total_vel = mean_vel.mean()
+
+        # Freeze: almost nothing moving
+        if total_vel < 5.0:
+            return 'freeze'
+
+        # Arm wave: arms dominate, legs quiet
+        if arm_vel > leg_vel * 2.0 and arm_vel > 20:
+            return 'arm_wave'
+
+        # Footwork: ankles/knees high, arms low
+        if ankle_vel > arm_vel * 1.5 and ankle_vel > 15:
+            return 'footwork'
+
+        # Chest pop: shoulders + spine spike, legs quiet
+        if sho_vel > arm_vel * 0.8 and spine_vel > leg_vel * 1.2 and leg_vel < 20:
+            return 'chest_pop'
+
+        # Bounce vs groove — both leg-dominant, differentiate by intensity
+        if hip_vel > arm_vel * 1.2 or knee_vel > arm_vel * 1.2:
+            if total_vel > 25:
+                return 'bounce'    # explosive, high velocity
+            else:
+                return 'groove'    # subtle rhythmic sway
+
+        # Default
+        return 'full_body'
+
+    def classify_sequence(self, velocity: np.ndarray, window_sec: float = 1.0,
+                           fps: float = 30.0) -> list:
+        """
+        Classify the full velocity sequence in sliding windows.
+
+        Returns a list of (start_frame, end_frame, move_type) tuples.
+        """
+        win = max(2, int(window_sec * fps))
+        n = len(velocity)
+        segments = []
+        i = 0
+        while i < n:
+            seg = velocity[i: i + win]
+            move = self.classify_segment(seg)
+            segments.append((i, min(i + win, n), move))
+            i += win
+        return segments
+
+    def get_mask_for_move(self, move_type: str) -> np.ndarray:
+        """Return normalised joint weight mask for the given move type."""
+        return self._NORM_MASKS.get(move_type, self._NORM_MASKS['full_body'])
+
+    def get_profile(self, move_type: str) -> dict:
+        """Return the scoring profile dict for the given move type."""
+        return self.MOVE_PROFILES.get(move_type, self.MOVE_PROFILES['full_body'])
+
+    def get_frame_masks(self, velocity: np.ndarray, fps: float = 30.0) -> np.ndarray:
+        """
+        Return per-frame mask array (shape N×13).
+        Each row is the normalised joint weight mask for that frame's move type.
+        """
+        segments = self.classify_sequence(velocity, fps=fps)
+        masks = np.ones((len(velocity), 13), dtype=float)
+        for start, end, move in segments:
+            masks[start:end] = self.get_mask_for_move(move)
+        return masks
+
+
+class HipHopDanceScorer:
+    """
+    Expert-aligned Hip Hop dance scoring engine.
+
+    Three pillars (matching professional judging criteria):
+      1. Timing / Musicality  (35%) — do movement peaks land on the beat?
+      2. Movement Quality     (35%) — is the motion pattern similar to teacher?
+      3. Power / Dynamics     (30%) — are hits sharp and contrasting?
+
+    Angle comparison is used only as a *shape similarity* signal within
+    Movement Quality, NOT as the primary score.  This avoids penalising
+    students for proportional body differences.
+
+    Joint scoring is context-aware: a MoveClassifier detects what move is
+    happening each second and applies a mask so only relevant joints count.
+    E.g. during a bounce, wrists score near-zero; during an arm wave,
+    knees score near-zero.
+    """
+
+    # Fallback weight vector used when no move mask is active (13 joints)
+    JOINT_WEIGHTS = np.array([
+        0.7, 0.7,   # 0-1  Elbows
+        1.0, 1.0,   # 2-3  Shoulders
+        0.3, 0.3,   # 4-5  Wrists
+        1.2, 1.2,   # 6-7  Hips
+        1.1, 1.1,   # 8-9  Knees
+        0.3, 0.3,   # 10-11 Ankles
+        1.5,        # 12   Spine
+    ])
+    JOINT_WEIGHTS = JOINT_WEIGHTS / JOINT_WEIGHTS.sum()
+
+    # Max ROM for normalisation (degrees)
+    MAX_ROM = np.array([150,150, 180,180, 120,120, 160,160, 160,160, 90,90, 90])
+
+    # Region → column indices
+    REGIONS = {
+        'arms':  [0, 1, 2, 3, 4, 5],
+        'legs':  [6, 7, 8, 9, 10, 11],
+        'torso': [12],
+    }
+
+    def __init__(self):
+        self.classifier = MoveClassifier()
+
+    # ── 1. TIMING / MUSICALITY ────────────────────────────────────────────────
+
+    def score_timing(self,
+                     student_vel: np.ndarray, student_ts: np.ndarray,
+                     teacher_vel: np.ndarray, teacher_ts: np.ndarray,
+                     student_beats: np.ndarray, teacher_beats: np.ndarray) -> dict:
+        """
+        Measure how well movement peaks align with musical beats.
+
+        For each beat in the teacher recording we find the nearest teacher
+        velocity spike; we then check whether the student has a spike within
+        ±WINDOW_SEC of the corresponding student beat.  Score = hit-rate × 100.
+
+        Falls back to cross-correlation of velocity envelopes when beat
+        detection yields too few events (e.g. no audio).
+        """
+        WINDOW_SEC = 0.18   # ±180 ms tolerance — tighter than DTW stretch
+
+        # Move-aware scalar velocity envelope.
+        # Per-frame masks ensure e.g. wrists score near-zero during a bounce.
+        def _masked_env(vel):
+            masks = self.classifier.get_frame_masks(vel)
+            n = min(len(vel), len(masks))
+            return (vel[:n] * masks[:n]).sum(axis=1)
+
+        s_env = _masked_env(student_vel)
+        t_env = _masked_env(teacher_vel)
+
+        # --- Beat-alignment path ---
+        if len(student_beats) >= 4 and len(teacher_beats) >= 4:
+            hits = 0
+            total = 0
+            for tb in teacher_beats:
+                # nearest teacher velocity peak around this beat
+                t_mask = np.abs(teacher_ts[:len(t_env)] - tb) < WINDOW_SEC
+                if not t_mask.any():
+                    continue
+                # check if student has a matching spike
+                sb = student_beats[np.argmin(np.abs(student_beats - tb))]
+                s_mask = np.abs(student_ts[:len(s_env)] - sb) < WINDOW_SEC
+                t_peak = t_env[t_mask].max()
+                s_peak = s_env[s_mask].max() if s_mask.any() else 0.0
+                total += 1
+                # student must reach ≥ 50% of teacher's peak at that beat
+                if s_mask.any() and s_peak >= 0.5 * t_peak:
+                    hits += 1
+
+            if total > 0:
+                raw_score = hits / total
+                timing_score = max(0.0, min(100.0, raw_score * 100))
+                return {'timing_score': round(timing_score, 2),
+                        'beats_matched': hits, 'beats_total': total,
+                        'method': 'beat_alignment'}
+
+        # --- Fallback: cross-correlation of velocity envelopes ---
+        min_len = min(len(s_env), len(t_env), 3000)  # cap for speed
+        s_clip = s_env[:min_len]
+        t_clip = t_env[:min_len]
+
+        def _norm(x):
+            x = x - x.mean()
+            std = x.std()
+            return x / std if std > 1e-9 else x
+
+        corr = np.correlate(_norm(s_clip), _norm(t_clip), mode='full')
+        # Best-lag similarity [-1, 1] → [0, 100]
+        best_sim = float(corr.max()) / max(min_len, 1)
+        timing_score = max(0.0, min(100.0, (best_sim + 1) * 50))
+        return {'timing_score': round(timing_score, 2),
+                'method': 'envelope_correlation'}
+
+    # ── 2. MOVEMENT QUALITY ───────────────────────────────────────────────────
+
+    def score_movement_quality(self,
+                                student_data: np.ndarray, student_ts: np.ndarray,
+                                teacher_data: np.ndarray, teacher_ts: np.ndarray,
+                                student_vel: np.ndarray, teacher_vel: np.ndarray) -> dict:
+        """
+        Measure shape similarity of the motion pattern — NOT raw angle values.
+
+        Two sub-components, averaged:
+          A. Velocity-pattern DTW: compare the velocity time-series (shape of
+             the movement) rather than absolute angles.  This is body-proportion
+             agnostic.
+          B. Normalised angle DTW: compare pose shapes with ROM-normalisation.
+             This penalises consistently wrong poses (e.g. never bending knees)
+             but is less sensitive to proportional differences.
+
+        DTW window is constrained to 10% of sequence length to prevent
+        excessive time-stretching that masks timing errors.
+        """
+        student_data = np.array(student_data, dtype=float)
+        teacher_data = np.array(teacher_data, dtype=float)
+
+        if len(student_data) < 2 or len(teacher_data) < 2:
+            return {'movement_score': 0, 'regional': {r: 0 for r in self.REGIONS},
+                    'velocity_score': 0, 'pose_shape_score': 0}
+
+        # ── Build per-frame move masks from TEACHER velocity (ground truth move) ──
+        # We use the teacher's movement to define what type of move is happening,
+        # then apply that mask to both teacher and student so irrelevant joints
+        # (e.g. wrists during a bounce) don't affect the score.
+        t_masks = self.classifier.get_frame_masks(teacher_vel)  # shape (T, 13)
+        # Pad or trim to match teacher_data length
+        n_t = len(teacher_data)
+        if len(t_masks) < n_t:
+            t_masks = np.vstack([t_masks, np.tile(t_masks[-1], (n_t - len(t_masks), 1))])
+        else:
+            t_masks = t_masks[:n_t]
+
+        # ── A. Velocity pattern DTW (move-context-aware) ──
+        # Frame index tracker so we can look up the teacher mask at DTW warp position j
+        def _vel_dist(a, b):
+            # a = student frame velocity (13,), b = teacher frame velocity (13,)
+            # Use fallback JOINT_WEIGHTS here — mask is applied in post-scoring
+            diff = (a - b) * self.JOINT_WEIGHTS
+            return float(np.sqrt((diff ** 2).sum()))
+
         try:
-            # Ensure inputs are numpy arrays
-            student_data = np.array(student_data)
-            teacher_data = np.array(teacher_data)
-            
-            # Guard rails
-            if len(student_data) == 0 or len(teacher_data) == 0:
-                return {"overall_score": 0, "pose_score": 0, "jitter_penalty": 0, "regional": {"arms": 0, "legs": 0, "torso": 0}}
-
-            # --- A. DTW Alignment with Biomechanical Weights ---
-            # fastdtw returns (distance, path)
-            distance, path = fastdtw(student_data, teacher_data, dist=self.weighted_dtw_distance)
-            path_len = len(path)
-            
-            # Normalize distance (average weighted error across the path)
-            # In our normalized scale, worst-case distance per frame is ~1.0
-            avg_distance = (distance / path_len) if path_len > 0 else 1.0
-            
-            # Pose accuracy converts distance to a 0-100 score
-            pose_score = max(0, min(100, (1 - avg_distance) * 100))
-            
-            # --- B. Temporal Stability Penalty ---
-            # Calculate smoothness: if student exhibits massive jitter vs teacher
-            student_smoothness = self.calculate_temporal_stability(student_data)
-            teacher_smoothness = self.calculate_temporal_stability(teacher_data)
-            
-            # Compare weighted jitter
-            jitter_diff = np.maximum(0, student_smoothness - teacher_smoothness) # only penalize excess jitter
-            weighted_jitter = np.sum((jitter_diff / self.max_rom) * self.weights)
-            
-            jitter_penalty = min(15, weighted_jitter * 50) # Cap penalty at 15 points
-            
-            # --- C. Compute Regional Breakdown ---
-            # Map out which columns belong to which region dynamically based on the path
-            s_aligned = np.array([student_data[i] for i, j in path])
-            t_aligned = np.array([teacher_data[j] for i, j in path])
-            
-            abs_errors = np.abs(s_aligned - t_aligned) / self.max_rom
-            mean_errors = np.mean(abs_errors, axis=0) # Shape: (13,)
-            
-            # Convert regional errors to 100-scale
-            def region_score(indices):
-                err = np.mean([mean_errors[i] for i in indices])
-                return max(0, min(100, (1 - err) * 100))
-
-            regional_scores = {
-                "arms": region_score([0, 1, 2, 3, 4, 5]),
-                "legs": region_score([6, 7, 8, 9, 10, 11]),
-                "torso": region_score([12])
-            }
-
-            # --- D. Final Calculation ---
-            final_score = max(0, min(100, pose_score - jitter_penalty))
-            
-            return {
-                "overall_score": round(final_score, 2),
-                "pose_score": round(pose_score, 2),
-                "jitter_penalty": round(jitter_penalty, 2),
-                "regional": {k: round(v, 2) for k, v in regional_scores.items()}
-            }
+            v_dist, v_path = fastdtw(student_vel, teacher_vel, dist=_vel_dist)
+            # Re-weight path errors by teacher move mask
+            masked_v_errors = []
+            for i, j in v_path:
+                si = min(i, len(student_vel) - 1)
+                tj = min(j, len(teacher_vel) - 1)
+                diff = np.abs(student_vel[si] - teacher_vel[tj])
+                mask = self.classifier.get_mask_for_move(
+                    self.classifier.classify_segment(teacher_vel[max(0,tj-5):tj+5])
+                )
+                masked_v_errors.append(float((diff * mask).sum()))
+            v_avg = float(np.mean(masked_v_errors)) if masked_v_errors else 1.0
+            velocity_score = max(0.0, min(100.0, (1 - v_avg / 80.0) * 100))
         except Exception:
-            return {"overall_score": 0, "pose_score": 0, "jitter_penalty": 0, "regional": {"arms": 0, "legs": 0, "torso": 0}}
+            velocity_score = 50.0
+            v_path = []
+
+        # ── B. Normalised angle DTW (move-context-aware) ──
+        def _angle_dist(a, b):
+            norm_a = a / self.MAX_ROM
+            norm_b = b / self.MAX_ROM
+            diff = (norm_a - norm_b) * self.JOINT_WEIGHTS
+            return float(np.sqrt((diff ** 2).sum()))
+
+        try:
+            a_dist, a_path = fastdtw(student_data, teacher_data, dist=_angle_dist)
+            a_avg = a_dist / max(len(a_path), 1)
+            pose_shape_score = max(0.0, min(100.0, (1 - a_avg) * 100))
+        except Exception:
+            pose_shape_score = 50.0
+            a_path = []
+
+        movement_score = 0.55 * velocity_score + 0.45 * pose_shape_score
+
+        # ── Regional breakdown using angle path + move masks ──
+        # Each frame's error is weighted by the teacher's move mask so regions
+        # that are irrelevant for that move type contribute less to the score.
+        regional = {}
+        if a_path:
+            s_al  = np.array([student_data[i]  for i, _ in a_path], dtype=float)
+            t_al  = np.array([teacher_data[j]  for _, j in a_path], dtype=float)
+            # Per-path-step move mask from teacher velocity
+            path_masks = np.array([
+                self.classifier.get_mask_for_move(
+                    self.classifier.classify_segment(
+                        teacher_vel[max(0, j-5): j+5] if j < len(teacher_vel) else teacher_vel[-5:]
+                    )
+                )
+                for _, j in a_path
+            ])  # shape (P, 13)
+
+            norm_err = np.abs(s_al - t_al) / self.MAX_ROM  # (P, 13)
+            weighted_err = norm_err * path_masks            # (P, 13) — irrelevant joints near-zero
+            mean_err = weighted_err.mean(axis=0)            # (13,)
+
+            for region, idx in self.REGIONS.items():
+                # Sum of mask weights for this region (to normalise fairly)
+                region_mask_sum = path_masks[:, idx].mean()
+                if region_mask_sum < 0.01:
+                    # Region was entirely masked out for this routine — give benefit of doubt
+                    regional[region] = 100.0
+                else:
+                    regional[region] = round(
+                        max(0.0, min(100.0, (1 - np.mean(mean_err[idx]) / (region_mask_sum + 1e-9)) * 100)), 2
+                    )
+        else:
+            regional = {r: round(movement_score, 2) for r in self.REGIONS}
+
+        return {
+            'movement_score': round(movement_score, 2),
+            'velocity_score': round(velocity_score, 2),
+            'pose_shape_score': round(pose_shape_score, 2),
+            'regional': regional,
+        }
+
+    # ── 3. POWER / DYNAMICS ───────────────────────────────────────────────────
+
+    def score_power(self,
+                    student_acc: np.ndarray, teacher_acc: np.ndarray,
+                    student_vel: np.ndarray, teacher_vel: np.ndarray) -> dict:
+        """
+        Measure sharpness and contrast of movement hits.
+
+        Two sub-scores:
+          A. Hit sharpness — ratio of student 90th-percentile acceleration
+             peaks to teacher peaks (weighted by joint importance).
+             Value < 1 means student's hits are softer than teacher's.
+
+          B. Dynamic contrast — std-dev of velocity envelope.
+             High std = dancer alternates between stillness and explosive moves.
+             Low std = monotone energy throughout.
+
+        Both are ratio-based so they are body-proportion agnostic.
+        """
+        def _weighted_scalar(arr):
+            return (np.clip(arr, 0, None) * self.JOINT_WEIGHTS).sum(axis=1)
+
+        s_acc_scalar = _weighted_scalar(student_acc)
+        t_acc_scalar = _weighted_scalar(teacher_acc)
+        s_vel_scalar = _weighted_scalar(student_vel)
+        t_vel_scalar = _weighted_scalar(teacher_vel)
+
+        # ── A. Hit sharpness ──
+        t_p90 = max(np.percentile(t_acc_scalar, 90), 1e-6)
+        s_p90 = np.percentile(s_acc_scalar, 90)
+        sharpness_ratio = min(s_p90 / t_p90, 1.3)   # cap at 130% — reward up to 30% overshoot
+        sharpness_score = max(0.0, min(100.0, sharpness_ratio * 100))
+
+        # ── B. Dynamic contrast ──
+        t_contrast = max(t_vel_scalar.std(), 1e-6)
+        s_contrast = s_vel_scalar.std()
+        contrast_ratio = min(s_contrast / t_contrast, 1.3)
+        contrast_score = max(0.0, min(100.0, contrast_ratio * 100))
+
+        power_score = 0.6 * sharpness_score + 0.4 * contrast_score
+
+        return {
+            'power_score': round(power_score, 2),
+            'sharpness_score': round(sharpness_score, 2),
+            'contrast_score': round(contrast_score, 2),
+        }
+
+    # ── MAIN EVALUATE ─────────────────────────────────────────────────────────
+
+    def evaluate(self,
+                 student_data: np.ndarray, student_ts: np.ndarray,
+                 teacher_data: np.ndarray, teacher_ts: np.ndarray,
+                 student_video_path: str = None,
+                 teacher_video_path: str = None) -> dict:
+        """
+        Full evaluation pipeline.
+
+        Returns a dict with:
+          overall_score  — weighted composite (0-100)
+          timing_score   — musicality component
+          movement_score — shape/velocity component
+          power_score    — sharpness/dynamics component
+          regional       — {arms, legs, torso} sub-scores
+          detail         — per-component detail for UI display
+        """
+        student_data = np.array(student_data, dtype=float)
+        teacher_data = np.array(teacher_data, dtype=float)
+
+        empty = {
+            'overall_score': 0, 'timing_score': 0,
+            'movement_score': 0, 'power_score': 0,
+            'regional': {'arms': 0, 'legs': 0, 'torso': 0},
+            'detail': {},
+        }
+
+        if len(student_data) < 3 or len(teacher_data) < 3:
+            return empty
+
+        # ── Kinematics ──
+        s_vel, s_acc = compute_joint_kinematics(student_data, student_ts)
+        t_vel, t_acc = compute_joint_kinematics(teacher_data, teacher_ts)
+        if s_vel is None or t_vel is None:
+            return empty
+
+        # ── Beat extraction (best-effort) ──
+        s_beats = extract_beat_times(student_video_path) if student_video_path else np.array([])
+        t_beats = extract_beat_times(teacher_video_path) if teacher_video_path else np.array([])
+
+        # ── Move classification (for UI display + context-aware feedback) ──
+        fps_est = len(student_data) / float(student_ts[-1]) if student_ts[-1] > 0 else 30.0
+        move_segments = self.classifier.classify_sequence(s_vel, fps=fps_est)
+        # Convert to serialisable list of {start_sec, end_sec, move}
+        move_timeline = [
+            {
+                'start_sec': round(student_ts[min(s, len(student_ts)-1)], 2),
+                'end_sec':   round(student_ts[min(e-1, len(student_ts)-1)], 2),
+                'move':      m,
+            }
+            for s, e, m in move_segments
+        ]
+
+        # ── Three-pillar scoring ──
+        t_res = self.score_timing(
+            s_vel, student_ts[:len(s_vel)],
+            t_vel, teacher_ts[:len(t_vel)],
+            s_beats, t_beats,
+        )
+        m_res = self.score_movement_quality(
+            student_data, student_ts,
+            teacher_data, teacher_ts,
+            s_vel, t_vel,
+        )
+        p_res = self.score_power(s_acc, t_acc, s_vel, t_vel)
+
+        timing_score   = t_res['timing_score']
+        movement_score = m_res['movement_score']
+        power_score    = p_res['power_score']
+
+        # Weighted composite — mirrors rubrik expert:
+        #   Musicality 35% | Movement 35% | Power 30%
+        overall_score = (
+            0.35 * timing_score +
+            0.35 * movement_score +
+            0.30 * power_score
+        )
+        overall_score = round(max(0.0, min(100.0, overall_score)), 2)
+
+        return {
+            'overall_score': overall_score,
+            'timing_score':  round(timing_score,   2),
+            'movement_score': round(movement_score, 2),
+            'power_score':   round(power_score,     2),
+            # regional breakdown comes from movement quality sub-scores
+            'regional': m_res['regional'],
+            'detail': {
+                'timing':   t_res,
+                'movement': m_res,
+                'power':    p_res,
+            },
+            'move_timeline': move_timeline,
+        }
 
 
-def generate_detailed_feedback(student_data, student_ts, teacher_data, teacher_ts=None, threshold_deg=25, top_n=None):
-    """Generate time-stamped, per-joint feedback using DTW alignment.
+def generate_detailed_feedback(student_data, student_ts, teacher_data, teacher_ts=None,
+                               threshold_deg=25, top_n=None,
+                               student_vel=None, teacher_vel=None):
+    """Generate time-stamped, per-joint feedback using velocity-aware DTW alignment.
 
-    Returns a list of feedback entries ordered by magnitude.
-    Each entry: {'joint': str, 'start_time': float, 'end_time': float,
-                 'avg_diff': float, 'student_angle': float, 'teacher_angle': float, 'message': str}
+    Primary signal: velocity difference (how the movement flows), not raw angle.
+    Secondary signal: sustained angle divergence (consistently wrong posture).
+
+    Returns a list of feedback entries ordered by severity.
+    Each entry: {joint, start_time, end_time, avg_diff, student_angle,
+                 teacher_angle, velocity_issue, message, teacher_time}
     """
     joint_names = ['L_Elbow', 'R_Elbow', 'L_Shoulder', 'R_Shoulder',
                    'L_Wrist', 'R_Wrist',
                    'L_Hip', 'R_Hip', 'L_Knee', 'R_Knee',
                    'L_Ankle', 'R_Ankle', 'Spine']
 
-    try:
-        distance, path = fastdtw(student_data, teacher_data, dist=euclidean)
-    except Exception:
-        return []
-
-    # path is list of (i,j) pairs mapping student idx -> teacher idx
-    # Group matched pairs by student index order
-    path_sorted = sorted(path, key=lambda p: p[0])
-
-    # For each joint, collect list of (student_time, diff, s_angle, t_angle)
-    per_joint_events = {j: [] for j in range(student_data.shape[1])}
-
-    for s_idx, t_idx in path_sorted:
-        if s_idx < 0 or t_idx < 0 or s_idx >= len(student_ts) or t_idx >= len(teacher_data):
-            continue
-        s_time = float(student_ts[s_idx])
-        t_time = float(teacher_ts[t_idx]) if (teacher_ts is not None and t_idx < len(teacher_ts)) else None
-        s_row = student_data[s_idx]
-        t_row = teacher_data[t_idx]
-        diffs = t_row - s_row
-        for j in range(len(diffs)):
-            per_joint_events[j].append((s_time, float(diffs[j]), float(s_row[j]), float(t_row[j]), t_time))
-
-    # Per-joint effective threshold multiplier.
-    # Lower-body joints (hips/knees/ankles) are penalised by camera-angle
-    # distortion and clothing occlusion, so raise their bar before flagging.
-    # Wrists/ankles (fast-moving extremities) also get a slight lift.
+    # Per-joint angle-diff threshold multipliers (unchanged — still useful for posture check)
     joint_threshold_mult = {
-        4: 1.3, 5: 1.3,   # L/R Wrist  – fast-moving extremities
-        6: 1.5, 7: 1.5,   # L/R Hip    – most affected by camera angle
-        8: 1.4, 9: 1.4,   # L/R Knee   – clothing + perspective
-        10: 1.5, 11: 1.5, # L/R Ankle  – foot/floor occlusion
+        4: 1.3, 5: 1.3,
+        6: 1.5, 7: 1.5,
+        8: 1.4, 9: 1.4,
+        10: 1.5, 11: 1.5,
     }
 
     feedback_list = []
 
-    for j, events in per_joint_events.items():
-        if not events:
-            continue
+    # ── A. Velocity-based feedback (primary) ─────────────────────────────────
+    # Identify joints where student velocity pattern differs significantly.
+    # Joints that are irrelevant for the current move type are SKIPPED entirely
+    # (e.g. wrists during a bounce, ankles during a chest pop).
+    _classifier = MoveClassifier()
 
-        eff_threshold = threshold_deg * joint_threshold_mult.get(j, 1.0)
+    if student_vel is not None and teacher_vel is not None:
+        try:
+            min_len = min(len(student_vel), len(teacher_vel))
+            vel_diff = student_vel[:min_len] - teacher_vel[:min_len]  # (N, 13)
+            # Per-frame teacher move masks (use teacher as ground-truth move ref)
+            t_frame_masks = _classifier.get_frame_masks(teacher_vel[:min_len])  # (N, 13)
+            # Use student timestamps for timing
+            s_ts_vel = student_ts[:min_len] if student_ts is not None else np.arange(min_len) / 30.0
 
-        # Find contiguous segments where abs(diff) > eff_threshold
-        runs = []
-        run = []
-        prev_time = None
-        for (t, diff, s_ang, tr_ang, t_time) in events:
-            if abs(diff) >= eff_threshold:
-                if run and prev_time is not None and t - prev_time > 0.6:
-                    runs.append(run)
-                    run = []
-                run.append((t, diff, s_ang, tr_ang, t_time))
-            else:
+            VEL_THRESHOLD = 30.0  # deg/s — significant velocity mismatch
+            # A joint is considered ACTIVE for a frame if its mask weight > 0.08
+            # (anything below that means the move type doesn't care about it)
+            MASK_ACTIVE_THRESHOLD = 0.08
+            MIN_DUR = 0.4
+
+            for j in range(vel_diff.shape[1]):
+                col = vel_diff[:, j]
+                runs = []
+                run = []
+                for i, v in enumerate(col):
+                    # Skip this joint at this frame if the move mask says it's irrelevant
+                    if t_frame_masks[i, j] < MASK_ACTIVE_THRESHOLD:
+                        if run:
+                            runs.append(run)
+                            run = []
+                        continue
+                    if abs(v) >= VEL_THRESHOLD:
+                        run.append((float(s_ts_vel[i]), float(v),
+                                    float(student_vel[i, j]), float(teacher_vel[i, j])))
+                    else:
+                        if run:
+                            runs.append(run)
+                            run = []
                 if run:
                     runs.append(run)
-                    run = []
-            prev_time = t
-        if run:
-            runs.append(run)
 
-        MIN_DURATION_SEC = 0.5
+                for run in runs:
+                    times = [r[0] for r in run]
+                    start_t, end_t = min(times), max(times)
+                    if (end_t - start_t) < MIN_DUR:
+                        continue
+                    avg_vdiff = float(np.mean([abs(r[1]) for r in run]))
+                    avg_s_vel = float(np.mean([r[2] for r in run]))
+                    avg_t_vel = float(np.mean([r[3] for r in run]))
 
-        for run in runs:
-            times = [r[0] for r in run]
-            start_t = min(times)
-            end_t = max(times)
+                    # Determine issue type
+                    if avg_s_vel < avg_t_vel * 0.6:
+                        vel_issue = 'too_slow'  # movement too soft / hesitant
+                    elif avg_s_vel > avg_t_vel * 1.5:
+                        vel_issue = 'too_fast'  # movement rushed / uncontrolled
+                    else:
+                        vel_issue = 'mistimed'  # present but wrong moment
 
-            # Skip micro-mistakes: must persist for at least MIN_DURATION_SEC
-            if (end_t - start_t) < MIN_DURATION_SEC:
+                    feedback_list.append({
+                        'joint': joint_names[j],
+                        'start_time': round(start_t, 2),
+                        'end_time': round(end_t, 2),
+                        'avg_diff': round(avg_vdiff, 1),
+                        'student_angle': None,
+                        'teacher_angle': None,
+                        'velocity_issue': vel_issue,
+                        'source': 'velocity',
+                        'teacher_time': None,
+                    })
+        except Exception as e:
+            print(f'[feedback] velocity pass error: {e}')
+
+    # ── B. Angle-based feedback (posture / sustained divergence) ─────────────
+    try:
+        distance, path = fastdtw(student_data, teacher_data, dist=euclidean)
+        path_sorted = sorted(path, key=lambda p: p[0])
+
+        per_joint_events = {j: [] for j in range(student_data.shape[1])}
+        for s_idx, t_idx in path_sorted:
+            if s_idx >= len(student_ts) or t_idx >= len(teacher_data):
                 continue
+            s_time = float(student_ts[s_idx])
+            t_time = float(teacher_ts[t_idx]) if (teacher_ts is not None and t_idx < len(teacher_ts)) else None
+            s_row = student_data[s_idx]
+            t_row = teacher_data[t_idx]
+            diffs = t_row - s_row
+            for j in range(len(diffs)):
+                per_joint_events[j].append((s_time, float(diffs[j]),
+                                             float(s_row[j]), float(t_row[j]), t_time))
 
-            diffs = [r[1] for r in run]
-            s_angs = [r[2] for r in run]
-            t_angs = [r[3] for r in run]
-            t_times = [r[4] for r in run if r[4] is not None]
-            avg_diff = float(sum(diffs) / len(diffs))
-            avg_s = float(sum(s_angs) / len(s_angs))
-            avg_t = float(sum(t_angs) / len(t_angs))
-            teacher_time = float(sum(t_times) / len(t_times)) if t_times else None
+        MIN_DURATION_SEC = 0.6
 
-            # Direction: positive avg_diff means teacher angle > student angle -> student should increase angle
-            if avg_diff > 0:
-                direction = f"Increase {joint_names[j]} by {abs(avg_diff):.1f}°"
-            else:
-                direction = f"Decrease {joint_names[j]} by {abs(avg_diff):.1f}°"
+        for j, events in per_joint_events.items():
+            if not events:
+                continue
+            eff_threshold = threshold_deg * joint_threshold_mult.get(j, 1.0)
+            runs = []
+            run = []
+            prev_time = None
+            for (t, diff, s_ang, tr_ang, t_time) in events:
+                if abs(diff) >= eff_threshold:
+                    if run and prev_time is not None and t - prev_time > 0.6:
+                        runs.append(run)
+                        run = []
+                    run.append((t, diff, s_ang, tr_ang, t_time))
+                else:
+                    if run:
+                        runs.append(run)
+                        run = []
+                prev_time = t
+            if run:
+                runs.append(run)
 
-            message = f"{direction} (student {avg_s:.1f}°, teacher {avg_t:.1f}°) around {start_t:.1f}s"
+            for run in runs:
+                times = [r[0] for r in run]
+                start_t, end_t = min(times), max(times)
+                if (end_t - start_t) < MIN_DURATION_SEC:
+                    continue
+                avg_diff = float(np.mean([r[1] for r in run]))
+                avg_s = float(np.mean([r[2] for r in run]))
+                avg_t = float(np.mean([r[3] for r in run]))
+                t_times = [r[4] for r in run if r[4] is not None]
+                teacher_time = float(np.mean(t_times)) if t_times else None
 
-            feedback_list.append({
-                'joint': joint_names[j],
-                'start_time': start_t,
-                'end_time': end_t,
-                'avg_diff': abs(avg_diff),
-                'student_angle': avg_s,
-                'teacher_angle': avg_t,
-                'message': message,
-                'teacher_time': teacher_time
-            })
+                feedback_list.append({
+                    'joint': joint_names[j],
+                    'start_time': round(start_t, 2),
+                    'end_time': round(end_t, 2),
+                    'avg_diff': round(abs(avg_diff), 1),
+                    'student_angle': round(avg_s, 1),
+                    'teacher_angle': round(avg_t, 1),
+                    'velocity_issue': None,
+                    'source': 'angle',
+                    'teacher_time': teacher_time,
+                })
+    except Exception as e:
+        print(f'[feedback] angle pass error: {e}')
 
-    # Return sorted by avg_diff descending (worst joints first); no cap by default
+    # Sort by severity (avg_diff) descending
     feedback_list.sort(key=lambda x: x['avg_diff'], reverse=True)
     return feedback_list if top_n is None else feedback_list[:top_n]
 
@@ -705,31 +1457,47 @@ def _friendly_message(entry):
     joint = entry.get('joint', '')
     start = entry.get('start_time', 0.0)
     avg_diff = entry.get('avg_diff', 0.0)
-    s_ang = entry.get('student_angle', 0.0)
-    t_ang = entry.get('teacher_angle', 0.0)
+    s_ang = entry.get('student_angle')
+    t_ang = entry.get('teacher_angle')
+    vel_issue = entry.get('velocity_issue')
+    source = entry.get('source', 'angle')
 
-    # Clean up joint name for display
     joint_name = joint.lower().replace('_', ' ')
 
-    # Core Logic: If Teacher Angle > Student Angle, student needs to INCREASE their angle
-    increase = t_ang > s_ang
+    # ── Velocity-based message (movement feel / timing) ──
+    if source == 'velocity' and vel_issue:
+        if vel_issue == 'too_slow':
+            return (f"At {start:.1f}s — Hit your {joint_name} harder and sharper. "
+                    f"Your movement is too soft here — teacher's motion is {avg_diff:.0f} deg/s faster.")
+        elif vel_issue == 'too_fast':
+            return (f"At {start:.1f}s — Slow down and control your {joint_name}. "
+                    f"You're moving {avg_diff:.0f} deg/s too fast — the movement feels rushed.")
+        else:  # mistimed
+            return (f"At {start:.1f}s — Your {joint_name} move is off-beat. "
+                    f"Sync this movement tighter to the music.")
 
+    # ── Angle-based message (posture / position) ──
+    if s_ang is None or t_ang is None:
+        return f"At {start:.1f}s — Adjust your {joint_name} position."
+
+    increase = t_ang > s_ang
     if 'knee' in joint_name or 'elbow' in joint_name:
         verb = 'straighten' if increase else 'bend'
     elif 'shoulder' in joint_name:
         verb = 'raise' if increase else 'lower'
     elif 'hip' in joint_name:
-        verb = 'stand straighter' if increase else 'bend deeper at the waist/hips'
+        verb = 'stand straighter at' if increase else 'bend deeper at'
     elif 'wrist' in joint_name:
-        verb = 'straighten/extend' if increase else 'bend/flex'
+        verb = 'extend' if increase else 'flex'
     elif 'ankle' in joint_name:
-        verb = 'point your toes more' if increase else 'flex your foot upward'
-    elif 'spine' in joint_name or 'posture' in joint_name:
-        verb = 'stand taller' if increase else 'lean forward'
+        verb = 'point your toes more at' if increase else 'flex your foot at'
+    elif 'spine' in joint_name:
+        verb = 'stand taller — straighten your back at' if increase else 'lean your torso forward at'
     else:
-        verb = 'increase angle of' if increase else 'decrease angle of'
+        verb = 'open up' if increase else 'tighten'
 
-    return f"At {start:.1f}s — {verb.capitalize()} your {joint_name} by about {abs(avg_diff):.0f}° (you: {s_ang:.0f}°, target: {t_ang:.0f}°)."
+    return (f"At {start:.1f}s — {verb.capitalize()} your {joint_name} "
+            f"(you: {s_ang:.0f}°, target: {t_ang:.0f}°, diff: {abs(avg_diff):.0f}°).")
 
 
 def get_semantic_feedback(angle_name, student_angle, teacher_angle):
@@ -1209,17 +1977,30 @@ def upload_student():
         except Exception:
             student_video_url = None
         
-        # Calculate scores using the new BiomechanicalScorer
-        scorer = BiomechanicalScorer()
-        scoring_results = scorer.evaluate(student_data, teacher_data)
-        
+        # Calculate scores using HipHopDanceScorer (Timing + Movement + Power)
+        scorer = HipHopDanceScorer()
+        scoring_results = scorer.evaluate(
+            student_data, student_ts,
+            teacher_data, teacher_ts,
+            student_video_path=filepath,
+            teacher_video_path=teacher_video_path_raw if os.path.exists(teacher_video_path_raw) else None,
+        )
+
         overall_score = scoring_results['overall_score']
-        arm_score = scoring_results['regional']['arms']
-        leg_score = scoring_results['regional']['legs']
+        arm_score   = scoring_results['regional']['arms']
+        leg_score   = scoring_results['regional']['legs']
         torso_score = scoring_results['regional']['torso']
 
-        # Generate detailed feedback (time-stamped)
-        detailed = generate_detailed_feedback(student_data, student_ts, teacher_data, teacher_ts=teacher_ts, threshold_deg=12)
+        # Derive kinematics for feedback generation
+        _s_vel, _s_acc = compute_joint_kinematics(student_data, student_ts)
+        _t_vel, _t_acc = compute_joint_kinematics(teacher_data, teacher_ts)
+
+        # Generate detailed feedback (velocity-aware + angle-based)
+        detailed = generate_detailed_feedback(
+            student_data, student_ts, teacher_data, teacher_ts=teacher_ts,
+            threshold_deg=20,
+            student_vel=_s_vel, teacher_vel=_t_vel,
+        )
 
         # Capture thumbnails for each feedback item and add friendly messages
         teacher_video_path = os.path.join(app.config['UPLOAD_FOLDER'], 'teacher_reference.mp4')
@@ -1267,8 +2048,13 @@ def upload_student():
             'student_name': student_name,
             'frames': len(student_data),
             'overall_score': overall_score,
-            'arm_score': arm_score,
-            'leg_score': leg_score,
+            # Three-pillar breakdown (new)
+            'timing_score':   scoring_results.get('timing_score',   0),
+            'movement_score': scoring_results.get('movement_score', 0),
+            'power_score':    scoring_results.get('power_score',    0),
+            # Regional breakdown (from movement quality)
+            'arm_score':   arm_score,
+            'leg_score':   leg_score,
             'torso_score': torso_score,
             'feedback': feedback,
             'star_rating': star_rating,
@@ -1276,7 +2062,9 @@ def upload_student():
             'composed_video': composed_full_url,
             'audio_offset_sec': round(audio_offset, 3),
             'teacher_trim_sec': round(t_trim_sec, 3),
-            'student_trim_sec': round(s_trim_sec, 3)
+            'student_trim_sec': round(s_trim_sec, 3),
+            'scoring_detail': scoring_results.get('detail', {}),
+            'move_timeline': scoring_results.get('move_timeline', []),
         }
         
         # Append to results file
@@ -1301,27 +2089,36 @@ def upload_student():
 
         # Produce prioritized semantic feedback for Arms, Legs, Torso
         try:
-            # Arms cols 0-5, Legs cols 6-11, Torso col 12
             min_len = min(len(student_data), len(teacher_data))
             diffs = np.abs(student_data[:min_len] - teacher_data[:min_len])
             mean_diffs = np.nanmean(diffs, axis=0)
-            # arms (0-5)
             arm_idx = int(np.argmax(mean_diffs[0:6]))
             arm_label_map = ['L_Elbow', 'R_Elbow', 'L_Shoulder', 'R_Shoulder', 'L_Wrist', 'R_Wrist']
             arm_msg = get_semantic_feedback(arm_label_map[arm_idx],
                 float(np.mean(student_data[:, arm_idx])), float(np.mean(teacher_data[:, arm_idx])))
-            # legs (6-11)
             leg_offset = int(6 + np.argmax(mean_diffs[6:12]))
             leg_label_map = ['L_Hip', 'R_Hip', 'L_Knee', 'R_Knee', 'L_Ankle', 'R_Ankle']
             leg_msg = get_semantic_feedback(leg_label_map[leg_offset - 6],
                 float(np.mean(student_data[:, leg_offset])), float(np.mean(teacher_data[:, leg_offset])))
-            # torso (12)
             torso_msg = get_semantic_feedback('Spine',
                 float(np.mean(student_data[:, 12])), float(np.mean(teacher_data[:, 12])))
 
-            results['semantic_feedback'] = {'arm': arm_msg, 'leg': leg_msg, 'torso': torso_msg}
+            # Augment with timing/power notes from scorer
+            timing_note = ''
+            power_note  = ''
+            t_detail = scoring_results.get('detail', {}).get('timing', {})
+            p_detail = scoring_results.get('detail', {}).get('power', {})
+            if t_detail.get('timing_score', 100) < 60:
+                timing_note = 'Focus on hitting your moves exactly on the beat — your timing is drifting.'
+            if p_detail.get('sharpness_score', 100) < 60:
+                power_note = 'Your hits need more power — make them sharper and more explosive.'
+
+            results['semantic_feedback'] = {
+                'arm': arm_msg, 'leg': leg_msg, 'torso': torso_msg,
+                'timing': timing_note, 'power': power_note,
+            }
         except Exception:
-            results['semantic_feedback'] = {'arm': '', 'leg': '', 'torso': ''}
+            results['semantic_feedback'] = {'arm': '', 'leg': '', 'torso': '', 'timing': '', 'power': ''}
 
         grading_history.append(results)
 

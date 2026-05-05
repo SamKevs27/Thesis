@@ -165,6 +165,7 @@ async function uploadTeacher(file) {
 
 async function uploadStudent(file) {
     const name = studentName.value || 'Student';
+    const movementType = document.getElementById('movementType').value;
     
     showLoading(true);
     
@@ -172,6 +173,7 @@ async function uploadStudent(file) {
         const formData = new FormData();
         formData.append('video', file);
         formData.append('name', name);
+        formData.append('movement_type', movementType);
         
         const response = await fetch('/api/upload-student', {
             method: 'POST',
