@@ -11,18 +11,37 @@ import glob
 import numpy as np
 import cv2
 import mediapipe as mp
-from flask import Flask, render_template, request, jsonify, session
+from flask import Flask, render_template, request, jsonify, redirect, url_for
+from flask_login import LoginManager, login_required, current_user
 from werkzeug.utils import secure_filename
+from models.database import db
+from models.user import User
+from models.attempt import Attempt
+from auth.routes import auth_bp
 from fastdtw import fastdtw
 from scipy.spatial.distance import euclidean
-from scipy.signal import correlate, resample
+from scipy.signal import correlate, savgol_filter, find_peaks
 from scipy.io import wavfile
 from datetime import datetime
 import json
 import shutil
+from flask.json.provider import DefaultJSONProvider
+from flask import send_from_directory
+from reference_loader import (load_all_references, get_reference,
+                               has_reference, list_available_references,
+                               get_all_references_meta)
+
+class NumpyJSONProvider(DefaultJSONProvider):
+    @staticmethod
+    def default(obj):
+        if isinstance(obj, np.integer): return int(obj)
+        if isinstance(obj, np.floating): return float(obj)
+        if isinstance(obj, np.ndarray): return obj.tolist()
+        return DefaultJSONProvider.default(obj)
 
 app = Flask(__name__, template_folder='templates', static_folder='static', static_url_path='/static')
-app.secret_key = 'dance_grading_secret_key_2024'
+app.json_provider_class = NumpyJSONProvider
+app.json = NumpyJSONProvider(app)
 
 # Configuration
 UPLOAD_FOLDER = 'uploads'
@@ -34,6 +53,30 @@ if not os.path.exists(UPLOAD_FOLDER):
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///dance.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['WTF_CSRF_ENABLED'] = True
+# PENTING: ganti secret_key dengan random string di production
+app.secret_key = 'dance-grading-secret-CHANGE-IN-PRODUCTION'
+
+# Init extensions
+db.init_app(app)
+login_manager = LoginManager(app)
+login_manager.login_view = 'auth.login'
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+# Register blueprint
+app.register_blueprint(auth_bp)
+
+# Create tables on first run
+with app.app_context():
+    db.create_all()
+
+# Load reference pose cache into memory
+load_all_references()
 
 # Debugging
 print(f"✓ Template folder: {os.path.abspath(app.template_folder)}")
@@ -41,6 +84,27 @@ print(f"✓ Static folder: {os.path.abspath(app.static_folder)}")
 
 # MediaPipe setup
 mp_pose = mp.solutions.pose
+
+# =====================================================================
+# EXPERT JUDGMENT CONFIGURATION (Ground Truth)
+# =====================================================================
+MOVEMENT_CONFIG = {
+    'bouncing': {
+        'core_joints': [8, 9],   # Knees only
+        'weights': {'wiraga': 0.50, 'wirama': 0.50, 'power': 0.0},
+        'thresholds': {'knee_bend_target': 90.0}
+    },
+    'stepping': {
+        'core_joints': [10, 11],   # Ankles
+        'weights': {'wiraga': 0.50, 'wirama': 0.50, 'power': 0.0},
+        'thresholds': {'timing_tolerance': 0.1}
+    },
+    'sliding': {
+        'core_joints': [6, 7, 10, 11, 12],   # Hips + Ankles + Spine
+        'weights': {'wiraga': 0.50, 'wirama': 0.50, 'power': 0.0},
+        'thresholds': {'sliding_dist_shoulder_ratio': 1.0}
+    },
+}
 
 # =====================================================================
 # ONE EURO FILTER — real-time per-joint jitter removal
@@ -190,7 +254,7 @@ def smooth_pose_data(pose_data, window_length=9, polyorder=3):
         return pose_data # Sequence too short to smooth safely
 
     # Apply filter along the time axis
-    smoothed_data = scipy.signal.savgol_filter(pose_data, window_length=window_length, polyorder=polyorder, axis=0)
+    smoothed_data = savgol_filter(pose_data, window_length=window_length, polyorder=polyorder, axis=0)
     
     return smoothed_data
 
@@ -232,16 +296,36 @@ def calculate_angle(a, b, c):
     
     return int(angle_deg)
 
+def downsample_pose_data(pose_data, timestamps, target_fps=12.0):
+    """Downsample pose and timestamp arrays to reduce FastDTW compute load.
+    
+    Keeps motion pattern intact while reducing frame count.
+    E.g., 30fps → 12fps removes 60% of frames, speeds DTW by ~6x.
+    """
+    if len(pose_data) < 2 or len(timestamps) < 2:
+        return pose_data, timestamps
+    
+    current_fps = len(pose_data) / float(timestamps[-1]) if timestamps[-1] > 0 else 30.0
+    if current_fps <= target_fps:
+        return pose_data, timestamps  # already slow enough
+    
+    stride = max(1, int(round(current_fps / target_fps)))
+    return pose_data[::stride], timestamps[::stride]
+
 def extract_angles_from_video(video_path):
     """Extract dance angles from video and return per-frame timestamps.
 
-    Returns (dance_data_array, timestamps_array, None) on success or
-    (None, None, error_message) on failure.
+    Returns (dance_data_array, timestamps_array, landmarks_data, error_message) on success or
+    (None, None, None, error_message) on failure.
 
     Visibility gating: each angle is only calculated when all three of its
     constituent MediaPipe landmarks have visibility >= VIS_THRESHOLD.  When any
     landmark is occluded / uncertain the angle falls back to the most recent
     reliable value so the pose array stays dense (no NaN gaps).
+    
+    ERROR HANDLING: If no pose landmarks are detected in a frame, that frame is
+    silently skipped. If the entire video has < 5 valid pose frames, an error
+    is returned rather than crashing.
     """
     VIS_THRESHOLD = 0.60   # 60% confidence required to trust a landmark
 
@@ -286,95 +370,99 @@ def extract_angles_from_video(video_path):
 
     with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as pose:
      while cap.isOpened():
-         ret, frame = cap.read()
-         if not ret:
-          break
-
-         raw_frame_index += 1
-
-         # Resize for faster processing
-         frame = cv2.resize(frame, (640, 480))
-
-         # Convert to RGB
-         image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-         image.flags.writeable = False
-         results = pose.process(image)
-         image.flags.writeable = True
-
          try:
-          if results.pose_landmarks is None:
-              continue
+             ret, frame = cap.read()
+             if not ret:
+              break
 
-          lm = results.pose_landmarks.landmark
-          PL = mp_pose.PoseLandmark
+             raw_frame_index += 1
 
-          # Grab 1€-filtered [x,y,z] coordinates — jitter removed per joint
-          current_time = raw_frame_index / float(fps)
-          def fxy(lm_id_enum):
-              return get_smoothed_xyz(lm, lm_id_enum, current_time).tolist()
+             # Resize for faster processing
+             frame = cv2.resize(frame, (640, 480))
 
-          l_sh = fxy(PL.LEFT_SHOULDER);   r_sh = fxy(PL.RIGHT_SHOULDER)
-          l_el = fxy(PL.LEFT_ELBOW);      r_el = fxy(PL.RIGHT_ELBOW)
-          l_wr = fxy(PL.LEFT_WRIST);      r_wr = fxy(PL.RIGHT_WRIST)
-          l_hi = fxy(PL.LEFT_HIP);        r_hi = fxy(PL.RIGHT_HIP)
-          l_kn = fxy(PL.LEFT_KNEE);       r_kn = fxy(PL.RIGHT_KNEE)
-          l_an = fxy(PL.LEFT_ANKLE);      r_an = fxy(PL.RIGHT_ANKLE)
-          l_idx = fxy(PL.LEFT_INDEX);     r_idx = fxy(PL.RIGHT_INDEX)
-          l_ft  = fxy(PL.LEFT_FOOT_INDEX); r_ft = fxy(PL.RIGHT_FOOT_INDEX)
-          nose  = fxy(PL.NOSE)
-          mid_sh = [(l_sh[0]+r_sh[0])/2, (l_sh[1]+r_sh[1])/2, (l_sh[2]+r_sh[2])/2]
-          mid_hi = [(l_hi[0]+r_hi[0])/2, (l_hi[1]+r_hi[1])/2, (l_hi[2]+r_hi[2])/2]
+             # Convert to RGB
+             image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+             image.flags.writeable = False
+             results = pose.process(image)
+             image.flags.writeable = True
 
-          # landmark id shortcuts for readability
-          LS = PL.LEFT_SHOULDER.value;   RS = PL.RIGHT_SHOULDER.value
-          LE = PL.LEFT_ELBOW.value;      RE = PL.RIGHT_ELBOW.value
-          LW = PL.LEFT_WRIST.value;      RW = PL.RIGHT_WRIST.value
-          LH = PL.LEFT_HIP.value;        RH = PL.RIGHT_HIP.value
-          LK = PL.LEFT_KNEE.value;       RK = PL.RIGHT_KNEE.value
-          LA = PL.LEFT_ANKLE.value;      RA = PL.RIGHT_ANKLE.value
-          LI = PL.LEFT_INDEX.value;      RI = PL.RIGHT_INDEX.value
-          LF = PL.LEFT_FOOT_INDEX.value; RF = PL.RIGHT_FOOT_INDEX.value
-          NO = PL.NOSE.value
+             # ── PERBAIKAN 2: Strict error handling for empty frames ──
+             if results is None or results.pose_landmarks is None:
+                 # No pose detected in this frame — skip silently
+                 continue
 
-          # Arms (0-5): L_Elbow, R_Elbow, L_Shoulder, R_Shoulder, L_Wrist, R_Wrist
-          # Legs (6-11): L_Hip, R_Hip, L_Knee, R_Knee, L_Ankle, R_Ankle
-          # Torso (12): Spine
-          raw_row = [
-              safe_angle(l_sh, l_el, l_wr,  lm, LS, LE, LW),   # 0  L_Elbow
-              safe_angle(r_sh, r_el, r_wr,  lm, RS, RE, RW),   # 1  R_Elbow
-              safe_angle(l_hi, l_sh, l_el,  lm, LH, LS, LE),   # 2  L_Shoulder
-              safe_angle(r_hi, r_sh, r_el,  lm, RH, RS, RE),   # 3  R_Shoulder
-              safe_angle(l_el, l_wr, l_idx, lm, LE, LW, LI),   # 4  L_Wrist
-              safe_angle(r_el, r_wr, r_idx, lm, RE, RW, RI),   # 5  R_Wrist
-              safe_angle(l_sh, l_hi, l_kn,  lm, LS, LH, LK),  # 6  L_Hip
-              safe_angle(r_sh, r_hi, r_kn,  lm, RS, RH, RK),  # 7  R_Hip
-              safe_angle(l_hi, l_kn, l_an,  lm, LH, LK, LA),  # 8  L_Knee
-              safe_angle(r_hi, r_kn, r_an,  lm, RH, RK, RA),  # 9  R_Knee
-              safe_angle(l_kn, l_an, l_ft,  lm, LK, LA, LF),  # 10 L_Ankle
-              safe_angle(r_kn, r_an, r_ft,  lm, RK, RA, RF),  # 11 R_Ankle
-              safe_angle(nose, mid_sh, mid_hi, lm, NO, LS, RS, LH, RH),  # 12 Spine
-          ]
+             lm = results.pose_landmarks.landmark
+             PL = mp_pose.PoseLandmark
 
-          # Fill None slots with previous frame's angle (temporal fall-back)
-          row = []
-          for col_i, val in enumerate(raw_row):
-              if val is not None:
-                  row.append(val)
-              elif prev_row is not None:
-                  row.append(prev_row[col_i])   # re-use last good value
-              else:
-                  row.append(90.0)              # neutral default first frame
+             # Grab 1€-filtered [x,y,z] coordinates — jitter removed per joint
+             current_time = raw_frame_index / float(fps)
+             def fxy(lm_id_enum):
+                 return get_smoothed_xyz(lm, lm_id_enum, current_time).tolist()
 
-          prev_row = row
-          dance_data.append(row)
-          # Save landmark coordinates for overlay
-          lm_list = [{'x': l.x, 'y': l.y, 'v': l.visibility} for l in lm]
-          landmarks_data.append(lm_list)
-          timestamps.append(raw_frame_index / float(fps))
+             l_sh = fxy(PL.LEFT_SHOULDER);   r_sh = fxy(PL.RIGHT_SHOULDER)
+             l_el = fxy(PL.LEFT_ELBOW);      r_el = fxy(PL.RIGHT_ELBOW)
+             l_wr = fxy(PL.LEFT_WRIST);      r_wr = fxy(PL.RIGHT_WRIST)
+             l_hi = fxy(PL.LEFT_HIP);        r_hi = fxy(PL.RIGHT_HIP)
+             l_kn = fxy(PL.LEFT_KNEE);       r_kn = fxy(PL.RIGHT_KNEE)
+             l_an = fxy(PL.LEFT_ANKLE);      r_an = fxy(PL.RIGHT_ANKLE)
+             l_idx = fxy(PL.LEFT_INDEX);     r_idx = fxy(PL.RIGHT_INDEX)
+             l_ft  = fxy(PL.LEFT_FOOT_INDEX); r_ft = fxy(PL.RIGHT_FOOT_INDEX)
+             nose  = fxy(PL.NOSE)
+             mid_sh = [(l_sh[0]+r_sh[0])/2, (l_sh[1]+r_sh[1])/2, (l_sh[2]+r_sh[2])/2]
+             mid_hi = [(l_hi[0]+r_hi[0])/2, (l_hi[1]+r_hi[1])/2, (l_hi[2]+r_hi[2])/2]
 
-         except Exception:
-          # ignore per-frame errors
-          pass
+             # landmark id shortcuts for readability
+             LS = PL.LEFT_SHOULDER.value;   RS = PL.RIGHT_SHOULDER.value
+             LE = PL.LEFT_ELBOW.value;      RE = PL.RIGHT_ELBOW.value
+             LW = PL.LEFT_WRIST.value;      RW = PL.RIGHT_WRIST.value
+             LH = PL.LEFT_HIP.value;        RH = PL.RIGHT_HIP.value
+             LK = PL.LEFT_KNEE.value;       RK = PL.RIGHT_KNEE.value
+             LA = PL.LEFT_ANKLE.value;      RA = PL.RIGHT_ANKLE.value
+             LI = PL.LEFT_INDEX.value;      RI = PL.RIGHT_INDEX.value
+             LF = PL.LEFT_FOOT_INDEX.value; RF = PL.RIGHT_FOOT_INDEX.value
+             NO = PL.NOSE.value
+
+             # Arms (0-5): L_Elbow, R_Elbow, L_Shoulder, R_Shoulder, L_Wrist, R_Wrist
+             # Legs (6-11): L_Hip, R_Hip, L_Knee, R_Knee, L_Ankle, R_Ankle
+             # Torso (12): Spine
+             raw_row = [
+                 safe_angle(l_sh, l_el, l_wr,  lm, LS, LE, LW),   # 0  L_Elbow
+                 safe_angle(r_sh, r_el, r_wr,  lm, RS, RE, RW),   # 1  R_Elbow
+                 safe_angle(l_hi, l_sh, l_el,  lm, LH, LS, LE),   # 2  L_Shoulder
+                 safe_angle(r_hi, r_sh, r_el,  lm, RH, RS, RE),   # 3  R_Shoulder
+                 safe_angle(l_el, l_wr, l_idx, lm, LE, LW, LI),   # 4  L_Wrist
+                 safe_angle(r_el, r_wr, r_idx, lm, RE, RW, RI),   # 5  R_Wrist
+                 safe_angle(l_sh, l_hi, l_kn,  lm, LS, LH, LK),  # 6  L_Hip
+                 safe_angle(r_sh, r_hi, r_kn,  lm, RS, RH, RK),  # 7  R_Hip
+                 safe_angle(l_hi, l_kn, l_an,  lm, LH, LK, LA),  # 8  L_Knee
+                 safe_angle(r_hi, r_kn, r_an,  lm, RH, RK, RA),  # 9  R_Knee
+                 safe_angle(l_kn, l_an, l_ft,  lm, LK, LA, LF),  # 10 L_Ankle
+                 safe_angle(r_kn, r_an, r_ft,  lm, RK, RA, RF),  # 11 R_Ankle
+                 safe_angle(nose, mid_sh, mid_hi, lm, NO, LS, RS, LH, RH),  # 12 Spine
+             ]
+
+             # Fill None slots with previous frame's angle (temporal fall-back)
+             row = []
+             for col_i, val in enumerate(raw_row):
+                 if val is not None:
+                     row.append(val)
+                 elif prev_row is not None:
+                     row.append(prev_row[col_i])   # re-use last good value
+                 else:
+                     row.append(90.0)              # neutral default first frame
+
+             prev_row = row
+             dance_data.append(row)
+             # Save landmark coordinates for overlay
+             lm_list = [{'x': l.x, 'y': l.y, 'v': l.visibility} for l in lm]
+             landmarks_data.append(lm_list)
+             timestamps.append(raw_frame_index / float(fps))
+
+         except Exception as frame_error:
+             # Per-frame processing error — log and continue without crashing
+             # This protects against frames with corrupt data, edge cases, etc.
+             print(f"[pose] Frame {raw_frame_index} error: {frame_error}")
+             pass
 
     cap.release()
 
@@ -386,26 +474,6 @@ def extract_angles_from_video(video_path):
 
     return smoothed_data, np.array(timestamps), landmarks_data, None
 
-def load_teacher_data(filepath='dance_data.csv'):
-    """Load teacher reference data"""
-    try:
-        data = []
-        with open(filepath, 'r') as f:
-            reader = csv.reader(f)
-            next(reader)  # Skip header
-            for row in reader:
-                data.append([int(float(x)) for x in row])
-        # also try to load teacher timestamps if available
-        ts_path = os.path.join(UPLOAD_FOLDER, 'teacher_timestamps.npy')
-        if os.path.exists(ts_path):
-            ts = np.load(ts_path)
-        else:
-            ts = None
-        return np.array(data), ts, None
-    except FileNotFoundError:
-        return None, None, "Teacher reference not found"
-    except Exception as e:
-        return None, None, f"Error reading reference: {str(e)}"
 
 def find_audio_offset(video_a_path: str, video_b_path: str,
                        sr: int = 16000, max_offset_sec: float = 60.0) -> float:
@@ -493,6 +561,26 @@ def find_audio_offset(video_a_path: str, video_b_path: str,
             if p and os.path.exists(p):
                 try: os.remove(p)
                 except Exception: pass
+
+
+def trim_leading_idle(pose_data, timestamps, vel, percentile=20, max_trim_sec=10.0):
+    """Return seconds to skip at the start while dancer is standing still.
+
+    Scans the velocity envelope from frame 0 and stops as soon as a rolling
+    window exceeds the Nth-percentile threshold of the whole sequence.
+    Returns 0.0 if no idle period is detected or data is too short.
+    """
+    if vel is None or len(vel) < 5 or len(timestamps) < 5:
+        return 0.0
+    envelope = np.mean(np.abs(vel), axis=1)
+    threshold = np.percentile(envelope, percentile)
+    fps = len(timestamps) / float(timestamps[-1]) if timestamps[-1] > 0 else 30.0
+    window = max(3, int(fps))
+    max_frames = int(fps * max_trim_sec)
+    for i in range(min(max_frames, len(envelope) - window)):
+        if np.mean(envelope[i:i + window]) > threshold:
+            return float(timestamps[i]) if i > 0 else 0.0
+    return 0.0
 
 
 def align_pose_data(teacher_data, teacher_ts, student_data, student_ts, offset_sec: float):
@@ -663,31 +751,21 @@ class MoveClassifier:
       10 L_Ankle   11 R_Ankle
       12 Spine
 
-    Move archetypes and the joints that MATTER for them:
-      bounce      — rhythmic up/down: hips, knees, spine only
-      arm_wave    — fluid arm propagation: elbows, shoulders, wrists
-      footwork    — foot/leg patterns: knees, ankles, hips
-      chest_pop   — chest isolation: spine, shoulders only
-      full_body   — everything counts (default / catch-all)
-      freeze      — static hold: all joints, extra weight on spine
-      groove      — subtle rock: hips, knees, spine (less strict than bounce)
+    Move archetypes (Coach Ambrosius Robby validation):
+      bouncing    — vertical knee/hip dominant
+      stepping    — ankle-led foot placement
+      sliding     — hip + ankle horizontal travel
+      full_body   — catch-all fallback (internal only)
     """
 
     # mask values: 1.0 = scored normally, 0.05 = nearly ignored, 0.0 = skip entirely
     MOVE_MASKS: dict = {
         # idx:        0     1     2     3     4     5     6     7     8     9    10    11    12
         #          L_Elb R_Elb L_Sho R_Sho L_Wri R_Wri L_Hip R_Hip L_Kne R_Kne L_Ank R_Ank Spin
-        'bounce':     [0.05, 0.05, 0.05, 0.05, 0.00, 0.00, 1.20, 1.20, 1.20, 1.20, 0.05, 0.05, 1.50],
-        'groove':     [0.10, 0.10, 0.20, 0.20, 0.00, 0.00, 1.20, 1.20, 1.00, 1.00, 0.10, 0.10, 1.20],
-        'arm_wave':   [1.20, 1.20, 1.20, 1.20, 1.00, 1.00, 0.05, 0.05, 0.05, 0.05, 0.00, 0.00, 0.30],
-        'chest_pop':  [0.20, 0.20, 1.20, 1.20, 0.10, 0.10, 0.30, 0.30, 0.10, 0.10, 0.00, 0.00, 1.50],
-        'footwork':   [0.05, 0.05, 0.05, 0.05, 0.00, 0.00, 1.00, 1.00, 1.30, 1.30, 1.20, 1.20, 0.30],
-        'freeze':     [0.80, 0.80, 1.00, 1.00, 0.40, 0.40, 1.00, 1.00, 1.00, 1.00, 0.60, 0.60, 1.50],
-        'top_rock':   [0.80, 0.80, 1.00, 1.00, 0.50, 0.50, 1.20, 1.20, 0.60, 0.60, 0.10, 0.10, 1.20],
-        'body_roll':  [0.30, 0.30, 0.80, 0.80, 0.20, 0.20, 1.00, 1.00, 0.50, 0.50, 0.10, 0.10, 1.50],
-        'popping':    [1.00, 1.00, 1.20, 1.20, 0.80, 0.80, 0.80, 0.80, 0.60, 0.60, 0.30, 0.30, 1.20],
-        'locking':    [1.20, 1.20, 1.00, 1.00, 1.00, 1.00, 0.80, 0.80, 0.80, 0.80, 0.50, 0.50, 0.80],
-        'full_body':  [0.70, 0.70, 1.00, 1.00, 0.30, 0.30, 1.20, 1.20, 1.10, 1.10, 0.30, 0.30, 1.50],
+        'bouncing':  [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.40, 0.40, 1.50, 1.50, 0.05, 0.05, 0.30],
+        'stepping':  [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.30, 0.30, 1.50, 1.50, 0.20],
+        'sliding':   [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 1.00, 1.00, 0.30, 0.30, 1.00, 1.00, 1.30],
+        'full_body': [0.70, 0.70, 1.00, 1.00, 0.30, 0.30, 1.20, 1.20, 1.10, 1.10, 0.30, 0.30, 1.50],
     }
 
     # ── Per-move scoring profiles ─────────────────────────────────────────────
@@ -698,104 +776,37 @@ class MoveClassifier:
     #   description     — one-line explanation of what the move emphasises
     #   feedback_cues   — what good execution looks and feels like
     MOVE_PROFILES: dict = {
-        'bounce': {
-            'display_name': 'Bounce',
-            'description':  'Rhythmic up-down motion driven by hips and knees',
-            'pillar_weights': {'timing': 0.45, 'movement': 0.30, 'power': 0.25},
-            'focus_joints':  ['Hips', 'Knees', 'Spine'],
-            'ignored_joints': ['Wrists', 'Ankles'],
-            'feedback_cues': 'Knees should absorb and rebound on every beat. '
-                             'Hips drive the bounce — spine follows naturally.',
+        'bouncing': {
+            'display_name': 'Bouncing',
+            'description':  'Rhythmic vertical knee bounce on every beat',
+            'pillar_weights': {'timing': 0.50, 'movement': 0.50, 'power': 0.0},
+            'focus_joints':  ['Knees'],
+            'ignored_joints': ['Arms', 'Wrists', 'Ankles'],
+            'feedback_cues': 'Knees absorb and rebound on every beat. Hips drive the bounce — spine follows naturally.',
         },
-        'groove': {
-            'display_name': 'Groove',
-            'description':  'Subtle rhythmic sway — the foundation of all hip hop',
-            'pillar_weights': {'timing': 0.50, 'movement': 0.35, 'power': 0.15},
-            'focus_joints':  ['Hips', 'Knees', 'Spine'],
-            'ignored_joints': ['Wrists', 'Ankles'],
-            'feedback_cues': 'Movement should feel effortless and musical. '
-                             'Less is more — every micro-shift should land on the beat.',
+        'stepping': {
+            'display_name': 'Stepping',
+            'description':  'Sharp foot-led steps with precise ankle placement and timing',
+            'pillar_weights': {'timing': 0.50, 'movement': 0.50, 'power': 0.0},
+            'focus_joints':  ['Ankles'],
+            'ignored_joints': ['Arms', 'Spine'],
+            'feedback_cues': 'Foot placement lands cleanly on the beat. No dragging.',
         },
-        'arm_wave': {
-            'display_name': 'Arm Wave',
-            'description':  'Fluid sequential wave propagating through the arm',
-            'pillar_weights': {'timing': 0.30, 'movement': 0.50, 'power': 0.20},
-            'focus_joints':  ['Shoulders', 'Elbows', 'Wrists'],
-            'ignored_joints': ['Knees', 'Ankles'],
-            'feedback_cues': 'Wave must pass through shoulder → elbow → wrist in sequence. '
-                             'Each joint isolates cleanly before passing to the next.',
-        },
-        'chest_pop': {
-            'display_name': 'Chest Pop',
-            'description':  'Sharp chest isolation — a core popping/locking technique',
-            'pillar_weights': {'timing': 0.35, 'movement': 0.30, 'power': 0.35},
-            'focus_joints':  ['Shoulders', 'Spine'],
-            'ignored_joints': ['Knees', 'Ankles', 'Wrists'],
-            'feedback_cues': 'Chest leads the hit — shoulders follow. '
-                             'Lower body stays still. Pop must be sharp, not gradual.',
-        },
-        'footwork': {
-            'display_name': 'Footwork',
-            'description':  'Fast foot and leg patterns — b-boy / house footwork',
-            'pillar_weights': {'timing': 0.40, 'movement': 0.35, 'power': 0.25},
-            'focus_joints':  ['Ankles', 'Knees', 'Hips'],
-            'ignored_joints': ['Wrists', 'Elbows'],
-            'feedback_cues': 'Foot placement must be precise and rhythmic. '
-                             'Weight transfers should be clean — no dragging.',
-        },
-        'freeze': {
-            'display_name': 'Freeze',
-            'description':  'Static hold — body locked in a pose with zero drift',
-            'pillar_weights': {'timing': 0.20, 'movement': 0.30, 'power': 0.50},
-            'focus_joints':  ['All joints'],
-            'ignored_joints': [],
-            'feedback_cues': 'Every joint must hold position. '
-                             'Any wobble or drift is penalised. Core and spine are critical.',
-        },
-        'top_rock': {
-            'display_name': 'Top Rock',
-            'description':  'Standing b-boy/b-girl entry steps — upper body + hip driven',
-            'pillar_weights': {'timing': 0.40, 'movement': 0.35, 'power': 0.25},
-            'focus_joints':  ['Hips', 'Shoulders', 'Elbows', 'Spine'],
-            'ignored_joints': ['Ankles', 'Wrists'],
-            'feedback_cues': 'Arms and hips must coordinate. '
-                             'Step rhythm drives the whole movement.',
-        },
-        'body_roll': {
-            'display_name': 'Body Roll',
-            'description':  'Sequential wave from chest through hips — fluid and continuous',
-            'pillar_weights': {'timing': 0.30, 'movement': 0.55, 'power': 0.15},
-            'focus_joints':  ['Spine', 'Hips', 'Shoulders'],
-            'ignored_joints': ['Ankles', 'Wrists'],
-            'feedback_cues': 'Motion must be sequential and smooth — no jerky segments. '
-                             'Spine is the conductor of the whole wave.',
-        },
-        'popping': {
-            'display_name': 'Popping',
-            'description':  'Muscle contractions creating sharp hits across the body',
-            'pillar_weights': {'timing': 0.35, 'movement': 0.25, 'power': 0.40},
-            'focus_joints':  ['Shoulders', 'Elbows', 'Hips', 'Spine'],
-            'ignored_joints': ['Ankles'],
-            'feedback_cues': 'Each pop is a sharp contraction then full release. '
-                             'No telegraphing — hit must be instant.',
-        },
-        'locking': {
-            'display_name': 'Locking',
-            'description':  'Exaggerated arm locks with funky rhythm and character',
-            'pillar_weights': {'timing': 0.40, 'movement': 0.30, 'power': 0.30},
-            'focus_joints':  ['Elbows', 'Wrists', 'Shoulders'],
-            'ignored_joints': ['Ankles'],
-            'feedback_cues': 'Lock must be crisp and held for exactly the right duration. '
-                             'Character and attitude are part of the execution.',
+        'sliding': {
+            'display_name': 'Sliding',
+            'description':  'Smooth horizontal travel — balance and body synchronisation are key',
+            'pillar_weights': {'timing': 0.50, 'movement': 0.50, 'power': 0.0},
+            'focus_joints':  ['Hips', 'Ankles', 'Spine (balance)'],
+            'ignored_joints': ['Arms', 'Knees'],
+            'feedback_cues': 'Smooth horizontal travel. Continuous without stiffness.',
         },
         'full_body': {
-            'display_name': 'Full Routine',
-            'description':  'Complete routine — all joints scored by move context',
-            'pillar_weights': {'timing': 0.35, 'movement': 0.35, 'power': 0.30},
+            'display_name': 'Full Body',
+            'description':  'Internal fallback — all joints scored by move context',
+            'pillar_weights': {'timing': 0.50, 'movement': 0.50, 'power': 0.0},
             'focus_joints':  ['All joints'],
             'ignored_joints': [],
-            'feedback_cues': 'Every part of the body is evaluated. '
-                             'Move classifier adapts weights automatically per section.',
+            'feedback_cues': 'Move classifier adapts weights automatically per section.',
         },
     }
 
@@ -813,54 +824,29 @@ class MoveClassifier:
     def classify_segment(self, vel_segment: np.ndarray) -> str:
         """
         Classify a short velocity segment (shape N×13) into a move archetype.
-
-        Heuristic rules derived from Hip Hop biomechanics:
-          - bounce:    high knee/hip velocity, low arm velocity, oscillatory pattern
-          - arm_wave:  high elbow/shoulder/wrist velocity, low leg velocity
-          - chest_pop: high shoulder+spine velocity, moderate elbow, low legs
-          - footwork:  high ankle/knee velocity, low arm velocity
-          - freeze:    near-zero velocity everywhere
-          - groove:    moderate hip/knee, low arms — less explosive than bounce
-          - full_body: everything above average
         """
         if vel_segment is None or len(vel_segment) < 2:
             return 'full_body'
 
         mean_vel = vel_segment.mean(axis=0)   # shape (13,)
 
-        arm_vel   = mean_vel[[0,1,2,3,4,5]].mean()    # elbows, shoulders, wrists
-        leg_vel   = mean_vel[[6,7,8,9,10,11]].mean()  # hips, knees, ankles
         hip_vel   = mean_vel[[6,7]].mean()
         knee_vel  = mean_vel[[8,9]].mean()
         ankle_vel = mean_vel[[10,11]].mean()
-        sho_vel   = mean_vel[[2,3]].mean()
-        spine_vel = mean_vel[12]
-        total_vel = mean_vel.mean()
+        arm_vel   = mean_vel[[0,1,2,3,4,5]].mean()
 
-        # Freeze: almost nothing moving
-        if total_vel < 5.0:
-            return 'freeze'
+        # Bouncing — vertical knee/hip dominant, ankles stable
+        if knee_vel > ankle_vel * 1.3 and knee_vel > arm_vel * 1.2:
+            return 'bouncing'
 
-        # Arm wave: arms dominate, legs quiet
-        if arm_vel > leg_vel * 2.0 and arm_vel > 20:
-            return 'arm_wave'
+        # Stepping — ankles dominant, fast foot movement
+        if ankle_vel > knee_vel * 1.2 and ankle_vel > arm_vel * 1.5:
+            return 'stepping'
 
-        # Footwork: ankles/knees high, arms low
-        if ankle_vel > arm_vel * 1.5 and ankle_vel > 15:
-            return 'footwork'
+        # Sliding — hips + ankles together, lower velocity overall
+        if hip_vel > arm_vel * 1.2 and ankle_vel > arm_vel * 1.0:
+            return 'sliding'
 
-        # Chest pop: shoulders + spine spike, legs quiet
-        if sho_vel > arm_vel * 0.8 and spine_vel > leg_vel * 1.2 and leg_vel < 20:
-            return 'chest_pop'
-
-        # Bounce vs groove — both leg-dominant, differentiate by intensity
-        if hip_vel > arm_vel * 1.2 or knee_vel > arm_vel * 1.2:
-            if total_vel > 25:
-                return 'bounce'    # explosive, high velocity
-            else:
-                return 'groove'    # subtle rhythmic sway
-
-        # Default
         return 'full_body'
 
     def classify_sequence(self, velocity: np.ndarray, window_sec: float = 1.0,
@@ -899,6 +885,132 @@ class MoveClassifier:
         for start, end, move in segments:
             masks[start:end] = self.get_mask_for_move(move)
         return masks
+
+
+# =====================================================================
+# WIRAGA TIME-SERIES ANALYSIS HELPERS
+# Implements expert framework: turning points (bouncing), foot strikes
+# (stepping), linear stability (sliding).
+# =====================================================================
+
+def _extract_landmark_axis(landmarks, landmark_id, axis='y'):
+    """Extract x or y for one landmark across all frames.
+
+    Format: landmarks[frame][landmark_id] = {'x': float, 'y': float, 'v': float}
+    Returns np.array shape (N,), or empty array on any failure.
+    """
+    if landmarks is None or len(landmarks) == 0:
+        return np.array([])
+    if axis not in ('x', 'y'):
+        return np.array([])
+    values = []
+    for frame in landmarks:
+        if not isinstance(frame, list) or len(frame) <= landmark_id:
+            continue
+        lm = frame[landmark_id]
+        if not isinstance(lm, dict) or axis not in lm:
+            continue
+        values.append(lm[axis])
+    return np.array(values, dtype=float)
+
+
+def _detect_bouncing_turning_points(knee_angles, hip_y_coords, fps=30.0):
+    """Detect bottom peaks of bouncing motion (deepest knee bends).
+
+    Returns list of {'frame', 'time', 'knee_depth', 'hip_y'}.
+    """
+    if knee_angles is None or len(knee_angles) < 10:
+        return []
+    knee_signal = knee_angles.mean(axis=1) if knee_angles.ndim == 2 else knee_angles
+    inv_knee = -knee_signal
+    prom = max(2.0, float(np.std(knee_signal)) * 0.3)
+    min_dist = max(1, int(fps * 0.25))
+    peaks, _ = find_peaks(inv_knee, prominence=prom, distance=min_dist)
+    turning_points = []
+    for fi in peaks:
+        if fi >= len(knee_signal):
+            continue
+        turning_points.append({
+            'frame':      int(fi),
+            'time':       float(fi / fps),
+            'knee_depth': float(knee_signal[fi]),
+            'hip_y':      float(hip_y_coords[fi])
+                          if hip_y_coords is not None and fi < len(hip_y_coords)
+                          else None,
+        })
+    return turning_points
+
+
+def _detect_foot_strikes(ankle_y_coords, fps=30.0, stationary_thresh=0.003,
+                         min_stationary_frames=3):
+    """Detect foot-strike moments — ankle Y stops descending (lands on floor).
+
+    Returns list of {'frame', 'time'}.
+    """
+    if ankle_y_coords is None or len(ankle_y_coords) < min_stationary_frames + 2:
+        return []
+    ay = np.asarray(ankle_y_coords)
+    dy = np.diff(ay)
+    strikes = []
+    i = 1
+    while i < len(dy) - min_stationary_frames:
+        descending = dy[i - 1] > 0.0015
+        static_window = dy[i: i + min_stationary_frames]
+        all_static = np.all(np.abs(static_window) < stationary_thresh)
+        if descending and all_static:
+            strikes.append({'frame': int(i), 'time': float(i / fps)})
+            i += min_stationary_frames
+        else:
+            i += 1
+    return strikes
+
+
+def _detect_weight_shift(hip_x_coords, ankle_x_coords, fps=30.0):
+    """Pearson correlation between hip X and ankle X lateral motion.
+
+    Returns float [0, 1]: 1.0 = perfect weight shift, 0.0 = hip stays static.
+    """
+    if hip_x_coords is None or ankle_x_coords is None:
+        return 0.0
+    if len(hip_x_coords) < 5 or len(ankle_x_coords) < 5:
+        return 0.0
+    h = np.asarray(hip_x_coords) - np.mean(hip_x_coords)
+    a = np.asarray(ankle_x_coords) - np.mean(ankle_x_coords)
+    h_std, a_std = h.std(), a.std()
+    if h_std < 1e-6 or a_std < 1e-6:
+        return 0.0
+    return max(0.0, float(np.mean(h * a) / (h_std * a_std)))
+
+
+def _measure_sliding_linearity(ankle_distance_x):
+    """R² of linear fit on ankle distance over time.
+
+    Returns float [0, 1]: 1.0 = perfectly linear slide.
+    """
+    if ankle_distance_x is None or len(ankle_distance_x) < 5:
+        return 0.0
+    d = np.asarray(ankle_distance_x)
+    x = np.arange(len(d), dtype=float)
+    slope, intercept = np.polyfit(x, d, 1)
+    d_pred = slope * x + intercept
+    ss_res = np.sum((d - d_pred) ** 2)
+    ss_tot = np.sum((d - d.mean()) ** 2)
+    if ss_tot < 1e-9:
+        return 0.0
+    return max(0.0, min(1.0, 1.0 - ss_res / ss_tot))
+
+
+def _measure_hip_y_stability(hip_y_coords):
+    """Stability of hip Y over time — 1.0 = flat (no bob), 0.0 = bouncing.
+
+    Maps coefficient of variation: CV=0 → 1.0, CV≥0.1 → 0.0.
+    """
+    if hip_y_coords is None or len(hip_y_coords) < 5:
+        return 0.0
+    hy = np.asarray(hip_y_coords)
+    mean = abs(hy.mean()) + 1e-6
+    cv = hy.std() / mean
+    return max(0.0, 1.0 - cv * 10.0)
 
 
 class HipHopDanceScorer:
@@ -950,7 +1062,8 @@ class HipHopDanceScorer:
     def score_timing(self,
                      student_vel: np.ndarray, student_ts: np.ndarray,
                      teacher_vel: np.ndarray, teacher_ts: np.ndarray,
-                     student_beats: np.ndarray, teacher_beats: np.ndarray) -> dict:
+                     student_beats: np.ndarray, teacher_beats: np.ndarray,
+                     window_sec: float = 0.18) -> dict:
         """
         Measure how well movement peaks align with musical beats.
 
@@ -961,7 +1074,7 @@ class HipHopDanceScorer:
         Falls back to cross-correlation of velocity envelopes when beat
         detection yields too few events (e.g. no audio).
         """
-        WINDOW_SEC = 0.18   # ±180 ms tolerance — tighter than DTW stretch
+        WINDOW_SEC = window_sec   # Dynamic tolerance based on movement config
 
         # Move-aware scalar velocity envelope.
         # Per-frame masks ensure e.g. wrists score near-zero during a bounce.
@@ -1021,7 +1134,8 @@ class HipHopDanceScorer:
     def score_movement_quality(self,
                                 student_data: np.ndarray, student_ts: np.ndarray,
                                 teacher_data: np.ndarray, teacher_ts: np.ndarray,
-                                student_vel: np.ndarray, teacher_vel: np.ndarray) -> dict:
+                                student_vel: np.ndarray, teacher_vel: np.ndarray,
+                                core_joints: list = None) -> dict:
         """
         Measure shape similarity of the motion pattern — NOT raw angle values.
 
@@ -1035,6 +1149,9 @@ class HipHopDanceScorer:
 
         DTW window is constrained to 10% of sequence length to prevent
         excessive time-stretching that masks timing errors.
+        
+        PERBAIKAN 3: FastDTW Optimization — Videos > 20 sec are downsampled to 12 fps
+        to reduce computational load while preserving motion patterns.
         """
         student_data = np.array(student_data, dtype=float)
         teacher_data = np.array(teacher_data, dtype=float)
@@ -1043,13 +1160,38 @@ class HipHopDanceScorer:
             return {'movement_score': 0, 'regional': {r: 0 for r in self.REGIONS},
                     'velocity_score': 0, 'pose_shape_score': 0}
 
+        # ── PERBAIKAN 3: Downsampling untuk video yang terlalu panjang ──
+        # Jika durasi video > 20 detik, downsample ke 12 fps untuk menghemat compute
+        s_duration = student_ts[-1] if len(student_ts) > 0 else 0
+        t_duration = teacher_ts[-1] if len(teacher_ts) > 0 else 0
+        max_duration = max(s_duration, t_duration)
+        
+        if max_duration > 20.0:  # longer than 20 seconds
+            print(f'[score_movement] Video duration {max_duration:.1f}s exceeds 20s threshold — downsampling to 12 fps')
+            student_data_dtw, student_ts_dtw = downsample_pose_data(student_data, student_ts, target_fps=12.0)
+            teacher_data_dtw, teacher_ts_dtw = downsample_pose_data(teacher_data, teacher_ts, target_fps=12.0)
+            student_vel_dtw = student_vel[::max(1, len(student_vel) // len(student_data_dtw))] if len(student_vel) > len(student_data_dtw) else student_vel
+            teacher_vel_dtw = teacher_vel[::max(1, len(teacher_vel) // len(teacher_data_dtw))] if len(teacher_vel) > len(teacher_data_dtw) else teacher_vel
+        else:
+            student_data_dtw, student_ts_dtw = student_data, student_ts
+            teacher_data_dtw, teacher_ts_dtw = teacher_data, teacher_ts
+            student_vel_dtw, teacher_vel_dtw = student_vel, teacher_vel
+
+        explicit_joint_mask = None
+        if core_joints is not None:
+            explicit_joint_mask = np.zeros(13, dtype=float)
+            valid_core_joints = [idx for idx in core_joints if 0 <= idx < 13]
+            if valid_core_joints:
+                explicit_joint_mask[valid_core_joints] = self.JOINT_WEIGHTS[valid_core_joints]
+                explicit_joint_mask = explicit_joint_mask / explicit_joint_mask.sum()
+
         # ── Build per-frame move masks from TEACHER velocity (ground truth move) ──
         # We use the teacher's movement to define what type of move is happening,
         # then apply that mask to both teacher and student so irrelevant joints
         # (e.g. wrists during a bounce) don't affect the score.
-        t_masks = self.classifier.get_frame_masks(teacher_vel)  # shape (T, 13)
+        t_masks = self.classifier.get_frame_masks(teacher_vel_dtw)  # shape (T, 13)
         # Pad or trim to match teacher_data length
-        n_t = len(teacher_data)
+        n_t = len(teacher_data_dtw)
         if len(t_masks) < n_t:
             t_masks = np.vstack([t_masks, np.tile(t_masks[-1], (n_t - len(t_masks), 1))])
         else:
@@ -1059,25 +1201,30 @@ class HipHopDanceScorer:
         # Frame index tracker so we can look up the teacher mask at DTW warp position j
         def _vel_dist(a, b):
             # a = student frame velocity (13,), b = teacher frame velocity (13,)
-            # Use fallback JOINT_WEIGHTS here — mask is applied in post-scoring
-            diff = (a - b) * self.JOINT_WEIGHTS
+            # If movement_type was selected by user, score only configured core joints.
+            joint_weights = explicit_joint_mask if explicit_joint_mask is not None else self.JOINT_WEIGHTS
+            diff = (a - b) * joint_weights
             return float(np.sqrt((diff ** 2).sum()))
 
         try:
-            v_dist, v_path = fastdtw(student_vel, teacher_vel, dist=_vel_dist)
+            v_dist, v_path = fastdtw(student_vel_dtw, teacher_vel_dtw, dist=_vel_dist)
             # Re-weight path errors by teacher move mask
             masked_v_errors = []
             for i, j in v_path:
-                si = min(i, len(student_vel) - 1)
-                tj = min(j, len(teacher_vel) - 1)
-                diff = np.abs(student_vel[si] - teacher_vel[tj])
-                mask = self.classifier.get_mask_for_move(
-                    self.classifier.classify_segment(teacher_vel[max(0,tj-5):tj+5])
-                )
+                si = min(i, len(student_vel_dtw) - 1)
+                tj = min(j, len(teacher_vel_dtw) - 1)
+                diff = np.abs(student_vel_dtw[si] - teacher_vel_dtw[tj])
+                if explicit_joint_mask is not None:
+                    mask = explicit_joint_mask
+                else:
+                    mask = self.classifier.get_mask_for_move(
+                        self.classifier.classify_segment(teacher_vel_dtw[max(0,tj-5):tj+5])
+                    )
                 masked_v_errors.append(float((diff * mask).sum()))
             v_avg = float(np.mean(masked_v_errors)) if masked_v_errors else 1.0
             velocity_score = max(0.0, min(100.0, (1 - v_avg / 80.0) * 100))
-        except Exception:
+        except Exception as e:
+            print(f'[score_movement] Velocity DTW error: {e}')
             velocity_score = 50.0
             v_path = []
 
@@ -1085,14 +1232,16 @@ class HipHopDanceScorer:
         def _angle_dist(a, b):
             norm_a = a / self.MAX_ROM
             norm_b = b / self.MAX_ROM
-            diff = (norm_a - norm_b) * self.JOINT_WEIGHTS
+            joint_weights = explicit_joint_mask if explicit_joint_mask is not None else self.JOINT_WEIGHTS
+            diff = (norm_a - norm_b) * joint_weights
             return float(np.sqrt((diff ** 2).sum()))
 
         try:
-            a_dist, a_path = fastdtw(student_data, teacher_data, dist=_angle_dist)
+            a_dist, a_path = fastdtw(student_data_dtw, teacher_data_dtw, dist=_angle_dist)
             a_avg = a_dist / max(len(a_path), 1)
             pose_shape_score = max(0.0, min(100.0, (1 - a_avg) * 100))
-        except Exception:
+        except Exception as e:
+            print(f'[score_movement] Angle DTW error: {e}')
             pose_shape_score = 50.0
             a_path = []
 
@@ -1103,17 +1252,20 @@ class HipHopDanceScorer:
         # that are irrelevant for that move type contribute less to the score.
         regional = {}
         if a_path:
-            s_al  = np.array([student_data[i]  for i, _ in a_path], dtype=float)
-            t_al  = np.array([teacher_data[j]  for _, j in a_path], dtype=float)
+            s_al  = np.array([student_data_dtw[i]  for i, _ in a_path], dtype=float)
+            t_al  = np.array([teacher_data_dtw[j]  for _, j in a_path], dtype=float)
             # Per-path-step move mask from teacher velocity
-            path_masks = np.array([
-                self.classifier.get_mask_for_move(
-                    self.classifier.classify_segment(
-                        teacher_vel[max(0, j-5): j+5] if j < len(teacher_vel) else teacher_vel[-5:]
+            if explicit_joint_mask is not None:
+                path_masks = np.tile(explicit_joint_mask, (len(a_path), 1))
+            else:
+                path_masks = np.array([
+                    self.classifier.get_mask_for_move(
+                        self.classifier.classify_segment(
+                            teacher_vel_dtw[max(0, j-5): j+5] if j < len(teacher_vel_dtw) else teacher_vel_dtw[-5:]
+                        )
                     )
-                )
-                for _, j in a_path
-            ])  # shape (P, 13)
+                    for _, j in a_path
+                ])  # shape (P, 13)
 
             norm_err = np.abs(s_al - t_al) / self.MAX_ROM  # (P, 13)
             weighted_err = norm_err * path_masks            # (P, 13) — irrelevant joints near-zero
@@ -1191,8 +1343,11 @@ class HipHopDanceScorer:
     def evaluate(self,
                  student_data: np.ndarray, student_ts: np.ndarray,
                  teacher_data: np.ndarray, teacher_ts: np.ndarray,
+                 student_landmarks: list = None,
+                 teacher_landmarks: list = None,
                  student_video_path: str = None,
-                 teacher_video_path: str = None) -> dict:
+                 teacher_video_path: str = None,
+                 selected_movement: str = None) -> dict:
         """
         Full evaluation pipeline.
 
@@ -1204,6 +1359,15 @@ class HipHopDanceScorer:
           regional       — {arms, legs, torso} sub-scores
           detail         — per-component detail for UI display
         """
+        if selected_movement not in MOVEMENT_CONFIG:
+            raise ValueError(
+                f"Invalid movement_type '{selected_movement}'. "
+                f"Valid movement_type values: {', '.join(MOVEMENT_CONFIG.keys())}"
+            )
+
+        config = MOVEMENT_CONFIG[selected_movement]
+        core_joints = config['core_joints']
+
         student_data = np.array(student_data, dtype=float)
         teacher_data = np.array(teacher_data, dtype=float)
 
@@ -1241,28 +1405,204 @@ class HipHopDanceScorer:
         ]
 
         # ── Three-pillar scoring ──
+        # Keep automatic classification for UI timeline only. The scoring rubric
+        # uses the movement_type selected by the user.
+        from collections import Counter
+        move_counts = Counter([m for s, e, m in move_segments])
+        timing_tolerance = config['thresholds'].get('timing_tolerance', 0.18)
+
         t_res = self.score_timing(
             s_vel, student_ts[:len(s_vel)],
             t_vel, teacher_ts[:len(t_vel)],
             s_beats, t_beats,
+            window_sec=timing_tolerance
         )
+        # For bouncing, symmetrize bilateral joint pairs before DTW so left/right
+        # asymmetry from camera angle doesn't penalize a correct bilateral bounce.
+        if selected_movement == 'bouncing':
+            def _symmetrize(arr):
+                a = arr.copy()
+                for l, r in [(6,7),(8,9),(10,11)]:  # hips, knees, ankles
+                    avg = (a[:, l] + a[:, r]) / 2
+                    a[:, l] = avg; a[:, r] = avg
+                return a
+            sd_dtw = _symmetrize(student_data)
+            td_dtw = _symmetrize(teacher_data)
+            sv_dtw = _symmetrize(s_vel)
+            tv_dtw = _symmetrize(t_vel)
+        else:
+            sd_dtw, td_dtw, sv_dtw, tv_dtw = student_data, teacher_data, s_vel, t_vel
+
         m_res = self.score_movement_quality(
-            student_data, student_ts,
-            teacher_data, teacher_ts,
-            s_vel, t_vel,
+            sd_dtw, student_ts,
+            td_dtw, teacher_ts,
+            sv_dtw, tv_dtw,
+            core_joints=core_joints,
         )
         p_res = self.score_power(s_acc, t_acc, s_vel, t_vel)
 
         timing_score   = t_res['timing_score']
-        movement_score = m_res['movement_score']
         power_score    = p_res['power_score']
+        
+        # ── WIRAGA SCORING — time-series analysis per movement ──────────────
+        # Expert framework: turning points (bouncing), foot strikes (stepping),
+        # linear stability (sliding).  Falls back to DTW if landmarks absent.
+        fps = 30.0
+        wiraga_breakdown = {'movement_type': selected_movement, 'components': {}}
 
-        # Weighted composite — mirrors rubrik expert:
-        #   Musicality 35% | Movement 35% | Power 30%
+        if selected_movement == 'bouncing':
+            target = config['thresholds']['knee_bend_target']
+            student_knees = student_data[:, [8, 9]]
+            student_hip_y = None
+            if student_landmarks:
+                l_hip_y = _extract_landmark_axis(student_landmarks, 23, 'y')
+                r_hip_y = _extract_landmark_axis(student_landmarks, 24, 'y')
+                if len(l_hip_y) > 0 and len(r_hip_y) > 0:
+                    mn = min(len(l_hip_y), len(r_hip_y))
+                    student_hip_y = (l_hip_y[:mn] + r_hip_y[:mn]) / 2.0
+
+            turning_points = _detect_bouncing_turning_points(
+                student_knees, student_hip_y, fps=fps
+            )
+            if not turning_points:
+                wiraga_score = 0.0
+                successful_bends = 0
+            else:
+                successful_bends = sum(
+                    1 for tp in turning_points if tp['knee_depth'] <= target
+                )
+                wiraga_score = float(successful_bends / len(turning_points)) * 100.0
+            print(f'[bouncing] {len(turning_points)} turning points, '
+                  f'{successful_bends} reached target (≤{target}°)')
+            wiraga_breakdown['components'] = {
+                'turning_points_count': len(turning_points),
+                'successful_bends': successful_bends,
+            }
+
+        elif selected_movement == 'stepping':
+            if not student_landmarks:
+                wiraga_score = m_res['movement_score']
+                wiraga_breakdown['components'] = {'fallback': 'no_landmarks'}
+            else:
+                l_ankle_y = _extract_landmark_axis(student_landmarks, 27, 'y')
+                r_ankle_y = _extract_landmark_axis(student_landmarks, 28, 'y')
+                strikes_l = _detect_foot_strikes(l_ankle_y, fps=fps)
+                strikes_r = _detect_foot_strikes(r_ankle_y, fps=fps)
+                total_strikes = len(strikes_l) + len(strikes_r)
+                if len(l_ankle_y) > 0 and len(r_ankle_y) > 0:
+                    print(f'[stepping debug] L_ankle_y range: {l_ankle_y.min():.3f}–{l_ankle_y.max():.3f}, '
+                          f'R_ankle_y range: {r_ankle_y.min():.3f}–{r_ankle_y.max():.3f}')
+
+                teacher_strikes = 0
+                if teacher_landmarks:
+                    t_l_y = _extract_landmark_axis(teacher_landmarks, 27, 'y')
+                    t_r_y = _extract_landmark_axis(teacher_landmarks, 28, 'y')
+                    teacher_strikes = (len(_detect_foot_strikes(t_l_y, fps=fps)) +
+                                       len(_detect_foot_strikes(t_r_y, fps=fps)))
+
+                if teacher_strikes > 0:
+                    strike_ratio = min(total_strikes / teacher_strikes, 1.0)
+                else:
+                    strike_ratio = min(total_strikes / 4.0, 1.0)
+                strike_accuracy = strike_ratio * 100.0
+
+                l_hip_x = _extract_landmark_axis(student_landmarks, 23, 'x')
+                r_hip_x = _extract_landmark_axis(student_landmarks, 24, 'x')
+                weight_shift_score = 50.0
+                if len(l_hip_x) > 0 and len(r_hip_x) > 0:
+                    mn = min(len(l_hip_x), len(r_hip_x))
+                    mid_hip_x = (l_hip_x[:mn] + r_hip_x[:mn]) / 2.0
+                    l_ankle_x = _extract_landmark_axis(student_landmarks, 27, 'x')
+                    r_ankle_x = _extract_landmark_axis(student_landmarks, 28, 'x')
+                    if len(l_ankle_x) > 0 and len(r_ankle_x) > 0:
+                        primary_ankle = (l_ankle_x if l_ankle_x.std() > r_ankle_x.std()
+                                         else r_ankle_x)
+                    elif len(l_ankle_x) > 0:
+                        primary_ankle = l_ankle_x
+                    elif len(r_ankle_x) > 0:
+                        primary_ankle = r_ankle_x
+                    else:
+                        primary_ankle = np.array([])
+                    if len(primary_ankle) >= 5:
+                        weight_shift_score = _detect_weight_shift(
+                            mid_hip_x, primary_ankle, fps=fps
+                        ) * 100.0
+
+                wiraga_score = strike_accuracy * 0.5 + weight_shift_score * 0.5
+                print(f'[stepping] strikes={total_strikes} (teacher={teacher_strikes}), '
+                      f'strike_acc={strike_accuracy:.1f}, weight_shift={weight_shift_score:.1f}')
+                wiraga_breakdown['components'] = {
+                    'foot_strikes':       total_strikes,
+                    'teacher_strikes':    teacher_strikes,
+                    'strike_accuracy':    round(strike_accuracy, 1),
+                    'weight_shift_score': round(weight_shift_score, 1),
+                }
+
+        elif selected_movement == 'sliding':
+            if not student_landmarks:
+                wiraga_score = m_res['movement_score']
+                wiraga_breakdown['components'] = {'fallback': 'no_landmarks'}
+            else:
+                l_ankle_x = _extract_landmark_axis(student_landmarks, 27, 'x')
+                r_ankle_x = _extract_landmark_axis(student_landmarks, 28, 'x')
+                l_hip_y   = _extract_landmark_axis(student_landmarks, 23, 'y')
+                r_hip_y   = _extract_landmark_axis(student_landmarks, 24, 'y')
+                l_sh_x    = _extract_landmark_axis(student_landmarks, 11, 'x')
+                r_sh_x    = _extract_landmark_axis(student_landmarks, 12, 'x')
+
+                if (len(l_ankle_x) > 0 and len(r_ankle_x) > 0 and
+                        len(l_hip_y) > 0 and len(r_hip_y) > 0):
+                    mn = min(len(l_ankle_x), len(r_ankle_x),
+                             len(l_hip_y), len(r_hip_y))
+                    ankle_dist = np.abs(l_ankle_x[:mn] - r_ankle_x[:mn])
+                    mid_hip_y  = (l_hip_y[:mn] + r_hip_y[:mn]) / 2.0
+
+                    linearity_score  = _measure_sliding_linearity(ankle_dist) * 100.0
+                    stability_score  = _measure_hip_y_stability(mid_hip_y) * 100.0
+
+                    reach_score = 50.0
+                    if len(l_sh_x) > 0 and len(r_sh_x) > 0:
+                        sh_width = np.abs(
+                            l_sh_x[:mn] - r_sh_x[:mn]
+                        ).mean()
+                        if sh_width > 1e-6:
+                            target_ratio = config['thresholds']['sliding_dist_shoulder_ratio']
+                            reach_score = min(ankle_dist.max() / sh_width / target_ratio, 1.0) * 100.0
+
+                    wiraga_score = (linearity_score + stability_score + reach_score) / 3.0
+                    print(f'[sliding] linearity={linearity_score:.1f}, '
+                          f'stability={stability_score:.1f}, reach={reach_score:.1f}')
+                    wiraga_breakdown['components'] = {
+                        'linearity':    round(linearity_score, 1),
+                        'hip_stability': round(stability_score, 1),
+                        'reach_ratio':  round(reach_score, 1),
+                    }
+                else:
+                    wiraga_score = m_res['movement_score']
+                    wiraga_breakdown['components'] = {'fallback': 'insufficient_landmarks'}
+
+        else:
+            wiraga_score = m_res['movement_score']
+            wiraga_breakdown['components'] = {'fallback': 'unknown_movement'}
+
+        wirama_score = timing_score
+        movement_score = wiraga_score
+
+        # Weighted composite menggunakan bobot dari MOVEMENT_CONFIG
+        # Ini adalah implementasi EXPERT JUDGMENT MATRIX yang memenuhi skripsi requirements
+        weight_wiraga = config['weights']['wiraga']
+        weight_wirama = config['weights']['wirama']
+        weight_power = config['weights']['power']
+
+        # For Coach basic moves (Wiraga 50% / Wirama 50%), Power dimension is
+        # not part of the expert validation framework. Skip its contribution.
+        if weight_power <= 0.0:
+            power_score = 0.0
+
         overall_score = (
-            0.35 * timing_score +
-            0.35 * movement_score +
-            0.30 * power_score
+            (weight_wiraga * wiraga_score) +
+            (weight_wirama * wirama_score) +
+            (weight_power * power_score)
         )
         overall_score = round(max(0.0, min(100.0, overall_score)), 2)
 
@@ -1271,233 +1611,344 @@ class HipHopDanceScorer:
             'timing_score':  round(timing_score,   2),
             'movement_score': round(movement_score, 2),
             'power_score':   round(power_score,     2),
+            'power_weight':  weight_power,
             # regional breakdown comes from movement quality sub-scores
             'regional': m_res['regional'],
             'detail': {
                 'timing':   t_res,
                 'movement': m_res,
                 'power':    p_res,
+                'movement_config': {
+                    'selected_movement': selected_movement,
+                    'core_joints': core_joints,
+                    'weights': config['weights'],
+                },
             },
             'move_timeline': move_timeline,
+            'selected_movement': selected_movement,
+            '_s_vel':          s_vel,
+            '_s_acc':          s_acc,
+            '_t_vel':          t_vel,
+            '_t_acc':          t_acc,
+            '_s_beats':        s_beats,
+            'wiraga_breakdown': wiraga_breakdown,
         }
 
 
-def generate_detailed_feedback(student_data, student_ts, teacher_data, teacher_ts=None,
-                               threshold_deg=25, top_n=None,
-                               student_vel=None, teacher_vel=None):
-    """Generate time-stamped, per-joint feedback using velocity-aware DTW alignment.
+def _wiraga_message(joint_name, diff, movement):
+    """Natural language message based on joint and direction."""
+    magnitude = abs(diff)
+    degree_str = f' (off by ~{int(magnitude)}°)' if magnitude > 15 else ''
 
-    Primary signal: velocity difference (how the movement flows), not raw angle.
-    Secondary signal: sustained angle divergence (consistently wrong posture).
+    if 'knee' in joint_name:
+        if diff > 0:
+            return f'Bend your {joint_name} deeper{degree_str}.'
+        else:
+            return f'Don\'t over-bend your {joint_name}{degree_str}.'
 
-    Returns a list of feedback entries ordered by severity.
-    Each entry: {joint, start_time, end_time, avg_diff, student_angle,
-                 teacher_angle, velocity_issue, message, teacher_time}
+    if 'hip' in joint_name:
+        if diff > 0:
+            return f'Lower your {joint_name} position — engage your core more{degree_str}.'
+        else:
+            return f'Stand taller — your {joint_name} is too low{degree_str}.'
+
+    if 'shoulder' in joint_name:
+        if diff > 0:
+            return f'Relax your {joint_name} — it\'s too tense or raised{degree_str}.'
+        else:
+            return f'Lift your {joint_name} slightly{degree_str}.'
+
+    if 'ankle' in joint_name:
+        if diff > 0:
+            return f'Flatten your {joint_name} — keep feet grounded{degree_str}.'
+        else:
+            return f'Lift on your toes more with your {joint_name}{degree_str}.'
+
+    if 'spine' in joint_name:
+        if diff > 0:
+            return f'Stand up straighter — your posture is leaning{degree_str}.'
+        else:
+            return f'Lean forward slightly to engage the movement{degree_str}.'
+
+    return f'Adjust your {joint_name} position{degree_str}.'
+
+
+def _find_missed_beats(student_vel, student_ts, student_beats, move_mask,
+                       window_sec=0.18):
+    """Return (miss_rate, occurrences) for music beats the student failed to hit.
+
+    For each musical beat extracted from the student's audio, checks whether
+    the student's masked velocity envelope has a movement peak within
+    ±window_sec.  Beats with no matching peak are flagged as missed.
+
+    Returns:
+        miss_rate   — float [0, 1], fraction of beats with no student peak
+        occurrences — list of {start_time, end_time, severity}
     """
-    joint_names = ['L_Elbow', 'R_Elbow', 'L_Shoulder', 'R_Shoulder',
-                   'L_Wrist', 'R_Wrist',
-                   'L_Hip', 'R_Hip', 'L_Knee', 'R_Knee',
-                   'L_Ankle', 'R_Ankle', 'Spine']
+    from scipy.signal import find_peaks
 
-    # Per-joint angle-diff threshold multipliers (unchanged — still useful for posture check)
-    joint_threshold_mult = {
-        4: 1.3, 5: 1.3,
-        6: 1.5, 7: 1.5,
-        8: 1.4, 9: 1.4,
-        10: 1.5, 11: 1.5,
+    if len(student_beats) < 4:
+        return 0.0, []
+
+    s_env = (student_vel * move_mask).sum(axis=1)
+    if len(s_env) < 5:
+        return 0.0, []
+
+    s_std = float(np.std(s_env))
+    if s_std == 0:
+        return 0.0, []
+
+    # Student movement impulses: peaks in the masked velocity envelope
+    s_peaks, _ = find_peaks(s_env, prominence=s_std * 0.3,
+                            distance=int(0.1 * 30))
+    s_peak_times = student_ts[s_peaks] if len(s_peaks) else np.array([])
+
+    missed = 0
+    occurrences = []
+    for beat_t in student_beats:
+        beat_t = float(beat_t)
+        if len(s_peak_times) == 0:
+            missed += 1
+            occurrences.append({
+                'start_time': round(beat_t - 0.1, 2),
+                'end_time':   round(beat_t + 0.1, 2),
+                'severity':   70.0,
+            })
+            continue
+        nearest = float(s_peak_times[np.argmin(np.abs(s_peak_times - beat_t))])
+        gap = abs(nearest - beat_t)
+        if gap > window_sec:
+            missed += 1
+            occurrences.append({
+                'start_time': round(beat_t - 0.1, 2),
+                'end_time':   round(beat_t + 0.1, 2),
+                'severity':   round(min(100.0, gap / window_sec * 50), 1),
+            })
+
+    miss_rate = missed / len(student_beats)
+    return miss_rate, occurrences
+
+
+def _find_joint_occurrences(student_data, teacher_data, joint_idx,
+                             student_ts, teacher_ts, threshold_deg=15,
+                             min_duration_sec=0.3):
+    """Find time ranges where joint angle differs significantly (DTW-aligned)."""
+    try:
+        _, path = fastdtw(student_data, teacher_data, dist=euclidean)
+    except Exception:
+        return []
+
+    occurrences = []
+    run = []
+    for s_idx, t_idx in sorted(path, key=lambda p: p[0]):
+        if s_idx >= len(student_ts) or t_idx >= len(teacher_data):
+            continue
+        diff = student_data[s_idx, joint_idx] - teacher_data[t_idx, joint_idx]
+        t_time = float(student_ts[s_idx])
+        if abs(diff) >= threshold_deg:
+            run.append((t_time, abs(diff)))
+        else:
+            if run:
+                start, end = run[0][0], run[-1][0]
+                if (end - start) >= min_duration_sec:
+                    avg_sev = sum(d for _, d in run) / len(run)
+                    occurrences.append({
+                        'start_time': round(start, 2),
+                        'end_time':   round(end, 2),
+                        'severity':   round(min(100, avg_sev * 2), 1),
+                    })
+                run = []
+    if run:
+        start, end = run[0][0], run[-1][0]
+        if (end - start) >= min_duration_sec:
+            avg_sev = sum(d for _, d in run) / len(run)
+            occurrences.append({
+                'start_time': round(start, 2),
+                'end_time':   round(end, 2),
+                'severity':   round(min(100, avg_sev * 2), 1),
+            })
+    return occurrences
+
+
+
+
+def generate_generalized_feedback(student_data, student_ts, teacher_data,
+                                   teacher_ts, student_vel, teacher_vel,
+                                   selected_movement, student_beats=None,
+                                   wiraga_breakdown=None):
+    """Aggregate feedback across all repetitions into generalized issues.
+
+    Returns list of dicts sorted by severity (worst first):
+      [{'type': 'wiraga'|'wirama', 'severity': 0-100, 'message': str,
+        'occurrences': [{'start_time', 'end_time', 'severity'}, ...]}, ...]
+    """
+    feedback = []
+    classifier = MoveClassifier()
+    move_mask = classifier.get_mask_for_move(selected_movement)
+    ACTIVE_JOINTS = [j for j, w in enumerate(move_mask) if w > 0.05]
+
+    joint_names = {
+        8: 'left knee', 9: 'right knee',
+        6: 'left hip', 7: 'right hip',
+        2: 'left shoulder', 3: 'right shoulder',
+        10: 'left ankle', 11: 'right ankle',
+        12: 'spine',
     }
 
-    feedback_list = []
+    # Wiraga: posture/form aggregated across entire video
+    try:
+        for j in ACTIVE_JOINTS:
+            if j not in joint_names:
+                continue
+            s_mean = float(np.mean(student_data[:, j]))
+            t_mean = float(np.mean(teacher_data[:, j]))
+            diff = s_mean - t_mean
+            if abs(diff) < 8:
+                continue
+            occurrences = _find_joint_occurrences(
+                student_data, teacher_data, j, student_ts, teacher_ts
+            )
+            if not occurrences:
+                continue
+            severity = min(100, abs(diff) * 2)
+            feedback.append({
+                'type': 'wiraga',
+                'severity': round(severity, 1),
+                'joint_index': j,
+                'message': _wiraga_message(joint_names[j], diff, selected_movement),
+                'occurrences': occurrences,
+            })
+    except Exception as e:
+        print(f'[feedback] wiraga pass error: {e}')
 
-    # ── A. Velocity-based feedback (primary) ─────────────────────────────────
-    # Identify joints where student velocity pattern differs significantly.
-    # Joints that are irrelevant for the current move type are SKIPPED entirely
-    # (e.g. wrists during a bounce, ankles during a chest pop).
-    _classifier = MoveClassifier()
-
-    if student_vel is not None and teacher_vel is not None:
+    # Wirama: grounded in music beats extracted from the student's own audio.
+    # Only fires when beat detection produced enough events; suppressed otherwise
+    # to avoid false positives from velocity-envelope comparison.
+    _beats = student_beats if student_beats is not None else np.array([])
+    if student_vel is not None and len(_beats) >= 4:
         try:
-            min_len = min(len(student_vel), len(teacher_vel))
-            vel_diff = student_vel[:min_len] - teacher_vel[:min_len]  # (N, 13)
-            # Per-frame teacher move masks (use teacher as ground-truth move ref)
-            t_frame_masks = _classifier.get_frame_masks(teacher_vel[:min_len])  # (N, 13)
-            # Use student timestamps for timing
-            s_ts_vel = student_ts[:min_len] if student_ts is not None else np.arange(min_len) / 30.0
+            miss_rate, occurrences = _find_missed_beats(
+                student_vel, student_ts, _beats, move_mask
+            )
+            if miss_rate > 0.25 and occurrences:
+                severity = min(100.0, miss_rate * 200)
+                pct = int(miss_rate * 100)
+                message = (
+                    f'You are missing {pct}% of the beats. '
+                    'Focus on landing each movement impulse exactly on the music.'
+                    if miss_rate > 0.5 else
+                    f'You are off-beat on about {pct}% of moments. '
+                    'Try to sync your movement peaks with the music.'
+                )
+                feedback.append({
+                    'type': 'wirama',
+                    'severity': round(severity, 1),
+                    'miss_rate': round(miss_rate, 3),
+                    'message': message,
+                    'occurrences': occurrences,
+                })
+        except Exception as e:
+            print(f'[feedback] wirama pass error: {e}')
+    elif len(_beats) < 4:
+        print(f'[feedback] wirama skipped: only {len(_beats)} audio beats detected')
 
-            VEL_THRESHOLD = 30.0  # deg/s — significant velocity mismatch
-            # A joint is considered ACTIVE for a frame if its mask weight > 0.08
-            # (anything below that means the move type doesn't care about it)
-            MASK_ACTIVE_THRESHOLD = 0.08
-            MIN_DUR = 0.4
-
-            for j in range(vel_diff.shape[1]):
-                col = vel_diff[:, j]
-                runs = []
-                run = []
-                for i, v in enumerate(col):
-                    # Skip this joint at this frame if the move mask says it's irrelevant
-                    if t_frame_masks[i, j] < MASK_ACTIVE_THRESHOLD:
-                        if run:
-                            runs.append(run)
-                            run = []
-                        continue
-                    if abs(v) >= VEL_THRESHOLD:
-                        run.append((float(s_ts_vel[i]), float(v),
-                                    float(student_vel[i, j]), float(teacher_vel[i, j])))
-                    else:
-                        if run:
-                            runs.append(run)
-                            run = []
-                if run:
-                    runs.append(run)
-
-                for run in runs:
-                    times = [r[0] for r in run]
-                    start_t, end_t = min(times), max(times)
-                    if (end_t - start_t) < MIN_DUR:
-                        continue
-                    avg_vdiff = float(np.mean([abs(r[1]) for r in run]))
-                    avg_s_vel = float(np.mean([r[2] for r in run]))
-                    avg_t_vel = float(np.mean([r[3] for r in run]))
-
-                    # Determine issue type
-                    if avg_s_vel < avg_t_vel * 0.6:
-                        vel_issue = 'too_slow'  # movement too soft / hesitant
-                    elif avg_s_vel > avg_t_vel * 1.5:
-                        vel_issue = 'too_fast'  # movement rushed / uncontrolled
-                    else:
-                        vel_issue = 'mistimed'  # present but wrong moment
-
-                    feedback_list.append({
-                        'joint': joint_names[j],
-                        'start_time': round(start_t, 2),
-                        'end_time': round(end_t, 2),
-                        'avg_diff': round(avg_vdiff, 1),
-                        'student_angle': None,
-                        'teacher_angle': None,
-                        'velocity_issue': vel_issue,
-                        'source': 'velocity',
-                        'teacher_time': None,
+    # Power consistency: velocity variance across reps (no specific moments)
+    if student_vel is not None:
+        try:
+            masked_vel = (student_vel * move_mask).sum(axis=1)
+            if len(masked_vel) > 10:
+                cv = float(np.std(masked_vel) / (np.mean(masked_vel) + 1e-6))
+                if cv < 0.3:
+                    feedback.append({
+                        'type': 'wiraga',
+                        'severity': 60,
+                        'message': 'Your movements lack dynamic contrast. Add more power to your hits.',
+                        'occurrences': [],
                     })
         except Exception as e:
-            print(f'[feedback] velocity pass error: {e}')
+            print(f'[feedback] power pass error: {e}')
 
-    # ── B. Angle-based feedback (posture / sustained divergence) ─────────────
-    try:
-        distance, path = fastdtw(student_data, teacher_data, dist=euclidean)
-        path_sorted = sorted(path, key=lambda p: p[0])
+    # Movement-specific wiraga messages from time-series analysis
+    if wiraga_breakdown:
+        comp = wiraga_breakdown.get('components', {})
+        movement = wiraga_breakdown.get('movement_type', selected_movement)
+        try:
+            if movement == 'bouncing' and 'turning_points_count' in comp:
+                tp  = comp['turning_points_count']
+                suc = comp['successful_bends']
+                if tp > 0 and suc / tp < 0.7:
+                    feedback.append({
+                        'type': 'wiraga',
+                        'severity': round((1 - suc / tp) * 100, 1),
+                        'message': (
+                            'Your bounces are not deep enough. '
+                            'Bend your knees to at least 90° at the bottom of each bounce.'
+                        ),
+                        'occurrences': [],
+                    })
 
-        per_joint_events = {j: [] for j in range(student_data.shape[1])}
-        for s_idx, t_idx in path_sorted:
-            if s_idx >= len(student_ts) or t_idx >= len(teacher_data):
-                continue
-            s_time = float(student_ts[s_idx])
-            t_time = float(teacher_ts[t_idx]) if (teacher_ts is not None and t_idx < len(teacher_ts)) else None
-            s_row = student_data[s_idx]
-            t_row = teacher_data[t_idx]
-            diffs = t_row - s_row
-            for j in range(len(diffs)):
-                per_joint_events[j].append((s_time, float(diffs[j]),
-                                             float(s_row[j]), float(t_row[j]), t_time))
+            elif movement == 'stepping' and 'strike_accuracy' in comp:
+                sa  = comp['strike_accuracy']
+                ws  = comp['weight_shift_score']
+                if sa < 60:
+                    feedback.append({
+                        'type': 'wiraga',
+                        'severity': round(100 - sa, 1),
+                        'message': (
+                            'Your step rhythm is unclear. '
+                            'Plant your feet firmly on each beat.'
+                        ),
+                        'occurrences': [],
+                    })
+                if ws < 60:
+                    feedback.append({
+                        'type': 'wiraga',
+                        'severity': round(100 - ws, 1),
+                        'message': (
+                            'Transfer your weight onto each stepping leg — '
+                            'your hips should shift with your foot.'
+                        ),
+                        'occurrences': [],
+                    })
 
-        MIN_DURATION_SEC = 0.6
+            elif movement == 'sliding' and 'linearity' in comp:
+                lin = comp['linearity']
+                stb = comp['hip_stability']
+                rch = comp['reach_ratio']
+                if lin < 60:
+                    feedback.append({
+                        'type': 'wiraga',
+                        'severity': round(100 - lin, 1),
+                        'message': (
+                            'Your slide is choppy. '
+                            'Glide smoothly without lifting or jumping your feet.'
+                        ),
+                        'occurrences': [],
+                    })
+                if stb < 60:
+                    feedback.append({
+                        'type': 'wiraga',
+                        'severity': round(100 - stb, 1),
+                        'message': (
+                            'Keep your upper body steady. '
+                            'Your hips should not bounce up and down during the slide.'
+                        ),
+                        'occurrences': [],
+                    })
+                if rch < 60:
+                    feedback.append({
+                        'type': 'wiraga',
+                        'severity': round(100 - rch, 1),
+                        'message': 'Slide farther — at least shoulder-width apart.',
+                        'occurrences': [],
+                    })
+        except Exception as e:
+            print(f'[feedback] movement-specific pass error: {e}')
 
-        for j, events in per_joint_events.items():
-            if not events:
-                continue
-            eff_threshold = threshold_deg * joint_threshold_mult.get(j, 1.0)
-            runs = []
-            run = []
-            prev_time = None
-            for (t, diff, s_ang, tr_ang, t_time) in events:
-                if abs(diff) >= eff_threshold:
-                    if run and prev_time is not None and t - prev_time > 0.6:
-                        runs.append(run)
-                        run = []
-                    run.append((t, diff, s_ang, tr_ang, t_time))
-                else:
-                    if run:
-                        runs.append(run)
-                        run = []
-                prev_time = t
-            if run:
-                runs.append(run)
-
-            for run in runs:
-                times = [r[0] for r in run]
-                start_t, end_t = min(times), max(times)
-                if (end_t - start_t) < MIN_DURATION_SEC:
-                    continue
-                avg_diff = float(np.mean([r[1] for r in run]))
-                avg_s = float(np.mean([r[2] for r in run]))
-                avg_t = float(np.mean([r[3] for r in run]))
-                t_times = [r[4] for r in run if r[4] is not None]
-                teacher_time = float(np.mean(t_times)) if t_times else None
-
-                feedback_list.append({
-                    'joint': joint_names[j],
-                    'start_time': round(start_t, 2),
-                    'end_time': round(end_t, 2),
-                    'avg_diff': round(abs(avg_diff), 1),
-                    'student_angle': round(avg_s, 1),
-                    'teacher_angle': round(avg_t, 1),
-                    'velocity_issue': None,
-                    'source': 'angle',
-                    'teacher_time': teacher_time,
-                })
-    except Exception as e:
-        print(f'[feedback] angle pass error: {e}')
-
-    # Sort by severity (avg_diff) descending
-    feedback_list.sort(key=lambda x: x['avg_diff'], reverse=True)
-    return feedback_list if top_n is None else feedback_list[:top_n]
+    feedback.sort(key=lambda x: x['severity'], reverse=True)
+    return feedback
 
 
-def _friendly_message(entry):
-    joint = entry.get('joint', '')
-    start = entry.get('start_time', 0.0)
-    avg_diff = entry.get('avg_diff', 0.0)
-    s_ang = entry.get('student_angle')
-    t_ang = entry.get('teacher_angle')
-    vel_issue = entry.get('velocity_issue')
-    source = entry.get('source', 'angle')
-
-    joint_name = joint.lower().replace('_', ' ')
-
-    # ── Velocity-based message (movement feel / timing) ──
-    if source == 'velocity' and vel_issue:
-        if vel_issue == 'too_slow':
-            return (f"At {start:.1f}s — Hit your {joint_name} harder and sharper. "
-                    f"Your movement is too soft here — teacher's motion is {avg_diff:.0f} deg/s faster.")
-        elif vel_issue == 'too_fast':
-            return (f"At {start:.1f}s — Slow down and control your {joint_name}. "
-                    f"You're moving {avg_diff:.0f} deg/s too fast — the movement feels rushed.")
-        else:  # mistimed
-            return (f"At {start:.1f}s — Your {joint_name} move is off-beat. "
-                    f"Sync this movement tighter to the music.")
-
-    # ── Angle-based message (posture / position) ──
-    if s_ang is None or t_ang is None:
-        return f"At {start:.1f}s — Adjust your {joint_name} position."
-
-    increase = t_ang > s_ang
-    if 'knee' in joint_name or 'elbow' in joint_name:
-        verb = 'straighten' if increase else 'bend'
-    elif 'shoulder' in joint_name:
-        verb = 'raise' if increase else 'lower'
-    elif 'hip' in joint_name:
-        verb = 'stand straighter at' if increase else 'bend deeper at'
-    elif 'wrist' in joint_name:
-        verb = 'extend' if increase else 'flex'
-    elif 'ankle' in joint_name:
-        verb = 'point your toes more at' if increase else 'flex your foot at'
-    elif 'spine' in joint_name:
-        verb = 'stand taller — straighten your back at' if increase else 'lean your torso forward at'
-    else:
-        verb = 'open up' if increase else 'tighten'
-
-    return (f"At {start:.1f}s — {verb.capitalize()} your {joint_name} "
-            f"(you: {s_ang:.0f}°, target: {t_ang:.0f}°, diff: {abs(avg_diff):.0f}°).")
 
 
 def get_semantic_feedback(angle_name, student_angle, teacher_angle):
@@ -1610,8 +2061,6 @@ def compose_side_by_side(teacher_path, student_path, out_path,
         s_interval = max(1, round(s_fps / OUT_FPS))
         t_frame_buf = None
         s_frame_buf = None
-        t_frame_idx = 0
-        s_frame_idx = 0
 
         for frame_i in range(max_frames):
             # Read teacher frame at its native rate (sub-sample to OUT_FPS)
@@ -1690,8 +2139,13 @@ def compose_side_by_side(teacher_path, student_path, out_path,
                 tmp_path = out_path + '.tmp.mp4'
                 try:
                     res = subprocess.run(
-                        ['ffmpeg', '-y', '-i', out_path,
+                        ['ffmpeg', '-y',
+                         '-i', out_path,
+                         '-ss', str(teacher_start), '-i', teacher_path,
+                         '-map', '0:v', '-map', '1:a?',
                          '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
+                         '-c:a', 'aac', '-b:a', '128k',
+                         '-shortest',
                          '-movflags', '+faststart', tmp_path],
                         capture_output=True, timeout=120
                     )
@@ -1709,7 +2163,8 @@ def compose_side_by_side(teacher_path, student_path, out_path,
         filter_g = (
             f"[0:v]trim=start={teacher_start},setpts=PTS-STARTPTS,fps=30,scale=-2:480,setsar=1,format=yuv420p[tv];"
             f"[1:v]trim=start={student_start},setpts=PTS-STARTPTS,fps=30,scale=-2:480,setsar=1,format=yuv420p[sv];"
-            "[tv][sv]hstack=inputs=2[out]"
+            "[tv][sv]hstack=inputs=2[out];"
+            f"[0:a]atrim=start={teacher_start},asetpts=PTS-STARTPTS[outa]"
         )
         cmd = (['ffmpeg', '-y',
                 '-i', teacher_path,
@@ -1717,211 +2172,94 @@ def compose_side_by_side(teacher_path, student_path, out_path,
                + dur_flag
                + ['-filter_complex', filter_g,
                   '-map', '[out]',
+                  '-map', '[outa]',
                   '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
-                  '-movflags', '+faststart', '-an', out_path])
+                  '-c:a', 'aac', '-b:a', '128k',
+                  '-shortest',
+                  '-movflags', '+faststart', out_path])
         result = subprocess.run(cmd, capture_output=True, timeout=120)
-        if result.returncode != 0:
-            print("[compose] FFmpeg Failed:", result.stderr.decode('utf-8', errors='replace'))
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True
+        # Retry without audio if teacher has no audio stream
+        print("[compose] FFmpeg with audio failed, retrying without audio:",
+              result.stderr.decode('utf-8', errors='replace')[-300:])
+        filter_g_noaudio = (
+            f"[0:v]trim=start={teacher_start},setpts=PTS-STARTPTS,fps=30,scale=-2:480,setsar=1,format=yuv420p[tv];"
+            f"[1:v]trim=start={student_start},setpts=PTS-STARTPTS,fps=30,scale=-2:480,setsar=1,format=yuv420p[sv];"
+            "[tv][sv]hstack=inputs=2[out]"
+        )
+        cmd2 = (['ffmpeg', '-y',
+                 '-i', teacher_path,
+                 '-i', student_path]
+                + dur_flag
+                + ['-filter_complex', filter_g_noaudio,
+                   '-map', '[out]',
+                   '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
+                   '-movflags', '+faststart', '-an', out_path])
+        result2 = subprocess.run(cmd2, capture_output=True, timeout=120)
+        if result2.returncode != 0:
+            print("[compose] FFmpeg fallback also failed:", result2.stderr.decode('utf-8', errors='replace')[-200:])
+        return result2.returncode == 0
     except Exception as e:
         print(f"[compose] FFmpeg fallback error: {e}")
         return False
 
 
-def save_feedback_thumbnails(student_video_path, detailed_feedback, student_name, teacher_video_path=None):
-    """Create side-by-side collage thumbnails for each feedback entry.
-    If `teacher_video_path` is provided and a teacher_time exists in entry,
-    capture both frames and combine horizontally. Attach `thumbnail` URL and
-    friendly `message` to each entry and return updated list.
-    """
-    out_dir = os.path.join(app.static_folder, 'uploads_thumbs')
-    if not os.path.exists(out_dir):
-        os.makedirs(out_dir)
-
-    student_cap = cv2.VideoCapture(student_video_path)
-    teacher_cap = cv2.VideoCapture(teacher_video_path) if teacher_video_path else None
-
-    updated = []
-    for idx, entry in enumerate(detailed_feedback):
-        s_time = float(entry.get('start_time', 0.0))
-        t_time = entry.get('teacher_time', None)
-        filename = secure_filename(f"{student_name}_{int(s_time*1000)}_{idx}.jpg")
-        out_path = os.path.join(out_dir, filename)
-        url_path = f"/static/uploads_thumbs/{filename}"
-
-        s_frame = None
-        t_frame = None
-
-        try:
-            # student frame
-            student_cap.set(cv2.CAP_PROP_POS_MSEC, int(s_time * 1000))
-            ret_s, s_frame = student_cap.read()
-            if not ret_s:
-                s_frame = None
-
-            # teacher frame, if available
-            if teacher_cap is not None and t_time is not None:
-                teacher_cap.set(cv2.CAP_PROP_POS_MSEC, int(float(t_time) * 1000))
-                ret_t, t_frame = teacher_cap.read()
-                if not ret_t:
-                    t_frame = None
-
-            # Build collage: prefer side-by-side (teacher on left, student on right)
-            if t_frame is not None and s_frame is not None:
-                # resize both to same height
-                th, tw = t_frame.shape[:2]
-                sh, sw = s_frame.shape[:2]
-                target_h = 240
-                t_scale = target_h / float(th)
-                s_scale = target_h / float(sh)
-                t_resized = cv2.resize(t_frame, (int(tw * t_scale), target_h))
-                s_resized = cv2.resize(s_frame, (int(sw * s_scale), target_h))
-                collage = cv2.hconcat([t_resized, s_resized])
-                cv2.imwrite(out_path, collage)
-                entry['thumbnail'] = url_path
-            elif s_frame is not None:
-                # single student thumbnail
-                sh, sw = s_frame.shape[:2]
-                target_w = 480
-                scale = target_w / float(sw)
-                thumb = cv2.resize(s_frame, (target_w, int(sh * scale)))
-                cv2.imwrite(out_path, thumb)
-                entry['thumbnail'] = url_path
-            elif t_frame is not None:
-                th, tw = t_frame.shape[:2]
-                target_w = 480
-                scale = target_w / float(tw)
-                thumb = cv2.resize(t_frame, (target_w, int(th * scale)))
-                cv2.imwrite(out_path, thumb)
-                entry['thumbnail'] = url_path
-            else:
-                entry['thumbnail'] = None
-        except Exception:
-            entry['thumbnail'] = None
-
-        # Add friendly message text and semantic dancer-language feedback
-        entry['message'] = _friendly_message(entry)
-        try:
-            entry['semantic'] = get_semantic_feedback(entry.get('joint',''), entry.get('student_angle',0.0), entry.get('teacher_angle',0.0))
-        except Exception:
-            entry['semantic'] = entry.get('message')
-        updated.append(entry)
-
-    student_cap.release()
-    if teacher_cap is not None:
-        teacher_cap.release()
-
-    return updated
-
 @app.route('/')
-def index():
-    """Main page"""
-    print("Serving index page")
-    return render_template('index.html')
+@login_required
+def dashboard():
+    return render_template('index.html', user=current_user)
 
 @app.route('/test')
 def test():
     """Test route"""
     return {'status': 'OK', 'message': 'Flask is running!'}
 
-@app.route('/api/upload-teacher', methods=['POST'])
-def upload_teacher():
-    """Handle teacher video upload and reference creation"""
-    if 'video' not in request.files:
-        return jsonify({'error': 'No video file provided'}), 400
-    
-    file = request.files['video']
-    
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
-    
-    if not allowed_file(file.filename):
-        return jsonify({'error': 'File type not allowed. Use MP4, AVI, MOV, MKV, or WebM'}), 400
-    
-    try:
-        # Save temporary file
-        # Save teacher reference video permanently to uploads/teacher_reference.mp4
-        filename = 'teacher_reference.mp4'
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
-
-        # Extract angles and timestamps from saved teacher video
-        dance_data, timestamps, landmarks_data, error = extract_angles_from_video(filepath)
-
-        if error:
-            os.remove(filepath)
-            return jsonify({'error': error}), 400
-        
-        # Save to CSV
-        with open('dance_data.csv', 'w') as f:
-            writer = csv.writer(f)
-            writer.writerow(['L_Elbow', 'R_Elbow', 'L_Shoulder', 'R_Shoulder',
-                           'L_Wrist', 'R_Wrist',
-                           'L_Hip', 'R_Hip', 'L_Knee', 'R_Knee',
-                           'L_Ankle', 'R_Ankle', 'Spine'])
-            writer.writerows(dance_data)
-
-        # Save teacher landmarks
-        import json
-        with open(os.path.join(app.config['UPLOAD_FOLDER'], 'teacher_landmarks.json'), 'w') as lf:
-            json.dump(landmarks_data, lf)
-
-        # Save teacher timestamps for later thumbnail extraction
-        ts_path = os.path.join(app.config['UPLOAD_FOLDER'], 'teacher_timestamps.npy')
-        try:
-            np.save(ts_path, timestamps)
-        except Exception:
-            pass
-
-        # Copy teacher video into static folder for in-page playback
-        try:
-            static_videos = os.path.join(app.static_folder, 'uploads_videos')
-            os.makedirs(static_videos, exist_ok=True)
-            teacher_static_path = os.path.join(static_videos, 'teacher_reference.mp4')
-            shutil.copy2(filepath, teacher_static_path)
-            shutil.copy2(os.path.join(app.config['UPLOAD_FOLDER'], 'teacher_landmarks.json'), 
-                         os.path.join(static_videos, 'teacher_landmarks.json'))
-        except Exception:
-            teacher_static_path = None
-        # Keep original teacher file in uploads as well
-        
-        return jsonify({
-            'success': True,
-            'message': f'Teacher reference created successfully!',
-            'frames': len(dance_data)
-        })
-    
-    except Exception as e:
-        if os.path.exists(filepath):
-            os.remove(filepath)
-        return jsonify({'error': f'Error processing video: {str(e)}'}), 500
 
 @app.route('/api/upload-student', methods=['POST'])
+@login_required
 def upload_student():
     """Handle student video upload and grading"""
-    # Check if teacher reference exists (data and timestamps)
-    teacher_data, teacher_ts, error = load_teacher_data()
-    if error:
-        return jsonify({'error': 'Please upload teacher video first'}), 400
-    
     if 'video' not in request.files:
         return jsonify({'error': 'No video file provided'}), 400
-    
+
     file = request.files['video']
-    
+
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
-    
+
     if not allowed_file(file.filename):
         return jsonify({'error': 'File type not allowed'}), 400
-    
+
+    selected_movement = request.form.get('movement_type', 'bouncing')
+    selected_movement = selected_movement.strip().lower() if selected_movement else 'bouncing'
+
+    VALID_MOVEMENTS = ('bouncing', 'stepping', 'sliding')
+    if selected_movement not in VALID_MOVEMENTS:
+        print(f'[warn] Invalid movement_type {selected_movement}, defaulting to bouncing')
+        selected_movement = 'bouncing'
+
+    # Validate reference exists
+    if not has_reference(selected_movement):
+        return jsonify({
+            'error': f'Reference for "{selected_movement}" not available. '
+                     'Please contact administrator to add reference video.'
+        }), 400
+
+    reference = get_reference(selected_movement)
+    teacher_data      = reference['joint_angles'].copy()
+    teacher_ts        = reference['timestamps'].copy()
+    teacher_landmarks = reference.get('landmarks')          # None for old caches
+    teacher_video_path_raw = os.path.join('assets', 'references',
+                                          reference['video_filename'])
+
     try:
         # Save temporary file
         student_name = request.form.get('name', 'Student')
         filename = secure_filename(f"student_{student_name}_{datetime.now().timestamp()}.mp4")
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
-        
+
         # Extract angles from video (also get timestamps)
         student_data, student_ts, landmarks_data, error = extract_angles_from_video(filepath)
 
@@ -1930,9 +2268,6 @@ def upload_student():
             return jsonify({'error': error}), 400
 
         # ── Audio-based temporal alignment ──────────────────────────────────
-        # Find where the two recordings are relative to the same piece of music
-        # and trim the pose arrays so both start at the same musical beat.
-        teacher_video_path_raw = os.path.join(app.config['UPLOAD_FOLDER'], 'teacher_reference.mp4')
         audio_offset = 0.0
         t_trim_sec   = 0.0
         s_trim_sec   = 0.0
@@ -1946,7 +2281,34 @@ def upload_student():
             except Exception as ae:
                 print(f'[align] Alignment skipped: {ae}')
         # ────────────────────────────────────────────────────────────────────
-        
+
+        # ── Idle-period trimming (Option B: auto, Option C: manual override) ─
+        _s_vel_pre, _ = compute_joint_kinematics(np.array(student_data, dtype=float), student_ts)
+        manual_start_raw = 0.0
+        try:
+            manual_start_raw = float(request.form.get('start_offset') or 0)
+        except (ValueError, TypeError):
+            pass
+
+        if manual_start_raw > 0:
+            # Option C: user marked start in raw video → subtract audio trim already applied
+            extra_sec  = max(0.0, manual_start_raw - s_trim_sec)
+            trim_source = 'manual'
+        else:
+            # Option B: auto-detect first sustained movement
+            extra_sec  = trim_leading_idle(student_data, student_ts, _s_vel_pre) if _s_vel_pre is not None else 0.0
+            trim_source = 'auto'
+
+        if extra_sec > 0.05 and _s_vel_pre is not None:
+            fps_s = len(student_ts) / float(student_ts[-1]) if student_ts[-1] > 0 else 30.0
+            extra_frames = min(int(extra_sec * fps_s), len(student_data) - 3)
+            if extra_frames > 0:
+                student_data = student_data[extra_frames:]
+                student_ts   = student_ts[extra_frames:]
+                s_trim_sec  += extra_sec
+                print(f'[idle-trim] source={trim_source}  +{extra_sec:.2f}s  total_s_trim={s_trim_sec:.2f}s')
+        # ─────────────────────────────────────────────────────────────────────
+
         # Save student data to CSV
         csv_filename = f"student_{student_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         csv_path = os.path.join(app.config['UPLOAD_FOLDER'], csv_filename)
@@ -1982,8 +2344,11 @@ def upload_student():
         scoring_results = scorer.evaluate(
             student_data, student_ts,
             teacher_data, teacher_ts,
+            student_landmarks=landmarks_data,
+            teacher_landmarks=teacher_landmarks,
             student_video_path=filepath,
             teacher_video_path=teacher_video_path_raw if os.path.exists(teacher_video_path_raw) else None,
+            selected_movement=selected_movement,
         )
 
         overall_score = scoring_results['overall_score']
@@ -1991,39 +2356,32 @@ def upload_student():
         leg_score   = scoring_results['regional']['legs']
         torso_score = scoring_results['regional']['torso']
 
-        # Derive kinematics for feedback generation
-        _s_vel, _s_acc = compute_joint_kinematics(student_data, student_ts)
-        _t_vel, _t_acc = compute_joint_kinematics(teacher_data, teacher_ts)
+        # Reuse kinematics already computed by the scorer for feedback generation.
+        _s_vel           = scoring_results.get('_s_vel')
+        _t_vel           = scoring_results.get('_t_vel')
+        _s_beats         = scoring_results.get('_s_beats', np.array([]))
+        _wiraga_breakdown = scoring_results.get('wiraga_breakdown', {})
 
-        # Generate detailed feedback (velocity-aware + angle-based)
-        detailed = generate_detailed_feedback(
-            student_data, student_ts, teacher_data, teacher_ts=teacher_ts,
-            threshold_deg=20,
-            student_vel=_s_vel, teacher_vel=_t_vel,
+        # Generate aggregated feedback across all repetitions
+        generalized = generate_generalized_feedback(
+            student_data, student_ts, teacher_data, teacher_ts,
+            _s_vel, _t_vel,
+            selected_movement,
+            student_beats=_s_beats,
+            wiraga_breakdown=_wiraga_breakdown,
         )
-
-        # Capture thumbnails for each feedback item and add friendly messages
-        teacher_video_path = os.path.join(app.config['UPLOAD_FOLDER'], 'teacher_reference.mp4')
-        if os.path.exists(teacher_video_path):
-            detailed = save_feedback_thumbnails(filepath, detailed, student_name, teacher_video_path=teacher_video_path)
-        else:
-            detailed = save_feedback_thumbnails(filepath, detailed, student_name, teacher_video_path=None)
 
         # Render the aligned side-by-side video on the server
         composed_name = f"composed_{student_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
         composed_path = os.path.join(app.static_folder, 'uploads_videos', composed_name)
-        
-        teacher_video_raw = os.path.join(app.config['UPLOAD_FOLDER'], 'teacher_reference.mp4')
-        if os.path.exists(teacher_video_raw):
+
+        if os.path.exists(teacher_video_path_raw):
             success = compose_side_by_side(
-                teacher_video_raw, filepath, composed_path,
-                teacher_start=t_trim_sec, student_start=s_trim_sec, 
+                teacher_video_path_raw, filepath, composed_path,
+                teacher_start=t_trim_sec, student_start=s_trim_sec,
                 fast_mode=True
             )
-            if success:
-                composed_full_url = f"/static/uploads_videos/{composed_name}"
-            else:
-                composed_full_url = None
+            composed_full_url = f"/static/uploads_videos/{composed_name}" if success else None
         else:
             composed_full_url = None
 
@@ -2052,6 +2410,7 @@ def upload_student():
             'timing_score':   scoring_results.get('timing_score',   0),
             'movement_score': scoring_results.get('movement_score', 0),
             'power_score':    scoring_results.get('power_score',    0),
+            'power_weight':   scoring_results.get('power_weight',   0),
             # Regional breakdown (from movement quality)
             'arm_score':   arm_score,
             'leg_score':   leg_score,
@@ -2065,26 +2424,15 @@ def upload_student():
             'student_trim_sec': round(s_trim_sec, 3),
             'scoring_detail': scoring_results.get('detail', {}),
             'move_timeline': scoring_results.get('move_timeline', []),
+            'selected_movement': scoring_results.get('selected_movement', selected_movement),
         }
         
-        # Append to results file
-        results_file = os.path.join(app.config['UPLOAD_FOLDER'], 'grading_results.json')
-        grading_history = []
-        
-        if os.path.exists(results_file):
-            with open(results_file, 'r') as f:
-                grading_history = json.load(f)
-        
-        # Attach detailed feedback to results
-        results['detailed_feedback'] = detailed
-        # Include URLs for in-page synchronized playback (teacher + student)
-        try:
-            teacher_static_url = '/static/uploads_videos/teacher_reference.mp4' if os.path.exists(os.path.join(app.static_folder, 'uploads_videos', 'teacher_reference.mp4')) else None
-        except Exception:
-            teacher_static_url = None
-        results['teacher_video'] = teacher_static_url
+        results['generalized_feedback'] = generalized
+        results['wiraga_breakdown']     = _wiraga_breakdown
+        # Reference video served from /assets/references/
+        results['teacher_video'] = f"/assets/references/{reference['video_filename']}"
         results['student_video'] = student_video_url if 'student_video_url' not in locals() else student_video_url
-        results['teacher_landmarks_url'] = "/static/uploads_videos/teacher_landmarks.json"
+        results['teacher_landmarks_url'] = None
         results['student_landmarks_url'] = f"/static/uploads_videos/student_{student_name}_landmarks.json"
 
         # Produce prioritized semantic feedback for Arms, Legs, Torso
@@ -2120,10 +2468,44 @@ def upload_student():
         except Exception:
             results['semantic_feedback'] = {'arm': '', 'leg': '', 'torso': '', 'timing': '', 'power': ''}
 
-        grading_history.append(results)
+        # Save to database
+        def _json_default(obj):
+            if isinstance(obj, np.integer): return int(obj)
+            if isinstance(obj, np.floating): return float(obj)
+            if isinstance(obj, np.ndarray): return obj.tolist()
+            raise TypeError(f'Not serializable: {type(obj)}')
 
-        with open(results_file, 'w') as f:
-            json.dump(grading_history, f, indent=2)
+        try:
+            _movement_score = float(results.get('movement_score', 0))
+            _timing_score   = float(results.get('timing_score', 0))
+            attempt = Attempt(
+                user_id=current_user.id,
+                movement_type=selected_movement,
+                overall_score=overall_score,
+                wiraga_score=round(_movement_score, 2),
+                wirama_score=round(_timing_score, 2),
+                video_path=results.get('student_video'),
+                composed_path=composed_full_url,
+                feedback_json=json.dumps({
+                    'student_name':       student_name,
+                    'frames':             len(student_data),
+                    'feedback':           feedback,
+                    'star_rating':        star_rating,
+                    'generalized_feedback': generalized,
+                    'semantic_feedback':  results.get('semantic_feedback', {}),
+                    'teacher_video':      results.get('teacher_video'),
+                    'audio_offset_sec':   round(audio_offset, 3),
+                    'teacher_trim_sec':   round(t_trim_sec, 3),
+                    'student_trim_sec':   round(s_trim_sec, 3),
+                    'move_timeline':      scoring_results.get('move_timeline', []),
+                    'selected_movement':  selected_movement,
+                }, default=_json_default)
+            )
+            db.session.add(attempt)
+            db.session.commit()
+            results['attempt_id'] = attempt.id
+        except Exception as db_err:
+            print(f'[db] Failed to save Attempt: {db_err}')
 
         # Clean up
         os.remove(filepath)
@@ -2136,88 +2518,119 @@ def upload_student():
         return jsonify({'error': f'Error processing video: {str(e)}'}), 500
 
 @app.route('/api/history')
+@login_required
 def get_history():
-    """Get grading history"""
-    results_file = os.path.join(app.config['UPLOAD_FOLDER'], 'grading_results.json')
-    
-    if not os.path.exists(results_file):
-        return jsonify([])
-    
+    """Get grading history for current user from database."""
     try:
-        with open(results_file, 'r') as f:
-            history = json.load(f)
+        attempts = (Attempt.query
+                    .filter_by(user_id=current_user.id)
+                    .order_by(Attempt.created_at.desc())
+                    .all())
+        history = []
+        for a in attempts:
+            extra = json.loads(a.feedback_json) if a.feedback_json else {}
+            history.append({
+                'id':               a.id,
+                'student_name':     extra.get('student_name', ''),
+                'movement_type':    a.movement_type,
+                'selected_movement': a.movement_type,
+                'overall_score':    a.overall_score,
+                'timing_score':     a.wirama_score,
+                'movement_score':   a.wiraga_score,
+                'composed_video':   a.composed_path,
+                'student_video':    a.video_path,
+                'teacher_video':    extra.get('teacher_video'),
+                'generalized_feedback': extra.get('generalized_feedback', extra.get('detailed_feedback', [])),
+                'feedback':         extra.get('feedback', ''),
+                'star_rating':      extra.get('star_rating', 0),
+                'timestamp':        a.created_at.isoformat(),
+                'frames':           extra.get('frames', 0),
+                'semantic_feedback': extra.get('semantic_feedback', {}),
+                'audio_offset_sec': extra.get('audio_offset_sec', 0),
+                'teacher_trim_sec': extra.get('teacher_trim_sec', 0),
+                'student_trim_sec': extra.get('student_trim_sec', 0),
+                'move_timeline':    extra.get('move_timeline', []),
+            })
         return jsonify(history)
-    except:
+    except Exception as e:
+        print(f'[history] DB error: {e}')
         return jsonify([])
 
 @app.route('/api/clear-history', methods=['POST'])
+@login_required
 def clear_history():
-    """Clear all grading history"""
-    results_file = os.path.join(app.config['UPLOAD_FOLDER'], 'grading_results.json')
-
-    cleanup_patterns = {
-        app.config['UPLOAD_FOLDER']: [
-            'student_*.csv',
-            'student_*.mp4',
-        ],
-        os.path.join(app.static_folder, 'uploads_videos'): [
-            'student_*.mp4',
-        ],
-        os.path.join(app.static_folder, 'uploads_clips'): [
-            'clip_*.mp4',
-            'full_*.mp4',
-        ],
-        os.path.join(app.static_folder, 'uploads_thumbs'): [
-            '*.jpg',
-            '*.jpeg',
-            '*.png',
-        ],
-    }
-
+    """Delete all Attempt records for current user and their associated files."""
     try:
-        deleted_count = 0
+        attempts = Attempt.query.filter_by(user_id=current_user.id).all()
+        deleted_files = 0
 
-        if os.path.exists(results_file):
-            os.remove(results_file)
+        for a in attempts:
+            # Delete composed video and student video files if they exist on disk
+            for url in [a.composed_path, a.video_path]:
+                if not url:
+                    continue
+                # Convert URL path like /static/uploads_videos/foo.mp4 → absolute path
+                rel = url.lstrip('/')
+                abs_path = os.path.join(os.path.dirname(__file__), rel)
+                if os.path.isfile(abs_path):
+                    try:
+                        os.remove(abs_path)
+                        deleted_files += 1
+                    except Exception:
+                        pass
+            db.session.delete(a)
 
-        for base_dir, patterns in cleanup_patterns.items():
-            if not os.path.exists(base_dir):
-                continue
+        db.session.commit()
 
-            for pattern in patterns:
-                for target_path in glob.glob(os.path.join(base_dir, pattern)):
-                    if os.path.isfile(target_path):
-                        os.remove(target_path)
-                        deleted_count += 1
+        # Also clean up temp CSV/landmarks/thumbs left in uploads/
+        for pattern in ['student_*.csv', 'student_*_landmarks.json']:
+            for p in glob.glob(os.path.join(app.config['UPLOAD_FOLDER'], pattern)):
+                try: os.remove(p)
+                except Exception: pass
 
-        return jsonify({'success': True, 'deleted_files': deleted_count})
+        return jsonify({'success': True, 'deleted_files': deleted_files})
     except Exception as e:
+        db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/status')
+@login_required
 def get_status():
-    """Get system status"""
-    teacher_exists = os.path.exists('dance_data.csv')
-    teacher_frames = 0
-    
-    if teacher_exists:
-        with open('dance_data.csv', 'r') as f:
-            reader = csv.reader(f)
-            next(reader)  # Skip header
-            teacher_frames = sum(1 for row in reader)
-    
-    results_file = os.path.join(app.config['UPLOAD_FOLDER'], 'grading_results.json')
-    student_count = 0
-    
-    if os.path.exists(results_file):
-        with open(results_file, 'r') as f:
-            student_count = len(json.load(f))
-    
+    """Get system status."""
     return jsonify({
-        'teacher_exists': teacher_exists,
-        'teacher_frames': teacher_frames,
-        'students_graded': student_count
+        'references_available': list_available_references(),
+        'student_attempts': current_user.get_attempt_count(),
+        'student_attempts_by_movement': {
+            m: current_user.get_attempt_count(m)
+            for m in ['bouncing', 'stepping', 'sliding']
+        },
     })
+
+
+@app.route('/api/references')
+@login_required
+def get_references():
+    """Return metadata for all available reference videos."""
+    refs = get_all_references_meta()
+    result = {}
+    for movement, meta in refs.items():
+        result[movement] = {
+            **meta,
+            'video_url': f'/assets/references/{meta["video_filename"]}',
+            'thumb_url': f'/assets/references/{movement}.thumb.jpg',
+        }
+    return jsonify(result)
+
+
+@app.route('/assets/references/<path:filename>')
+@login_required
+def serve_reference(filename):
+    """Serve reference videos and thumbnails."""
+    return send_from_directory(
+        os.path.join(os.path.dirname(__file__), 'assets', 'references'),
+        filename
+    )
+
 
 if __name__ == '__main__':
     app.run(debug=True, host='localhost', port=8080)

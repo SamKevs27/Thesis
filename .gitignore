@@ -1,0 +1,14 @@
+instance/
+*.db
+uploads/*
+!uploads/.gitkeep
+__pycache__/
+*.pyc
+.env
+
+# Reference videos and thumbnails (large binary — re-generate with scripts/)
+assets/references/*.mp4
+assets/references/*.thumb.jpg
+
+# Pre-computed pose cache (re-generate with scripts/precompute_references.py)
+assets/reference_cache/*.json

@@ -1,1088 +1,2577 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dance Grading System</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #fafafa; color: #111; line-height: 1.6; min-height: 100vh; padding: 40px 20px; }
-        .container { max-width: 1000px; margin: 0 auto; }
-        .header { background: #fff; padding: 40px; border-radius: 12px; margin-bottom: 40px; border: 1px solid #eaeaea; }
-        .header-content h1 { font-size: 2rem; margin-bottom: 8px; font-weight: 600; letter-spacing: -0.03em; }
-        .header-content p { color: #666; font-size: 0.95rem; }
-        .status-bar { display: flex; gap: 20px; margin-top: 30px; flex-wrap: wrap; }
-        .status-item { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: #f5f5f5; border-radius: 6px; font-size: 0.85rem; font-weight: 500; color: #333; border: 1px solid #eaeaea; }
-        .status-indicator { width: 8px; height: 8px; border-radius: 50%; background-color: #f5a623; }
-        .status-indicator.ready { background-color: #10b981; }
-        .content { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; margin-bottom: 40px; }
-        @media (max-width: 768px) { .content { grid-template-columns: 1fr; } }
-        .card { background: #fff; border-radius: 12px; padding: 40px; border: 1px solid #eaeaea; transition: border-color 0.2s; display: flex; flex-direction: column; }
-        .card:hover { border-color: #ddd; }
-        .section-header { margin-bottom: 30px; }
-        .section-header h2 { font-size: 1.25rem; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 6px; }
-        .subtitle { color: #666; font-size: 0.9rem; }
-        .upload-area { border: 1px dashed #ccc; border-radius: 8px; padding: 40px 20px; text-align: center; cursor: pointer; transition: background 0.2s, border-color 0.2s; margin: 20px 0; background: #fafafa; }
-        .upload-area:hover { border-color: #111; background: #fdfdfd; }
-        .upload-area h3 { font-size: 0.95rem; font-weight: 500; margin-bottom: 4px; }
-        .upload-area p { color: #888; font-size: 0.8rem; }
-        .btn { padding: 12px 24px; border: none; border-radius: 6px; font-size: 0.9rem; font-weight: 500; cursor: pointer; transition: opacity 0.2s; width: 100%; margin-top: 10px; }
-        .btn-primary { background: #111; color: #fff; }
-        .btn-primary:active { transform: scale(0.98); }
-        .btn-primary:hover:not(:disabled) { opacity: 0.9; }
-        .btn-primary:disabled { opacity: 0.3; cursor: not-allowed; }
-        .student-info { margin-bottom: 24px; }
-        .student-info label { display: block; margin-bottom: 8px; font-weight: 500; font-size: 0.85rem; }
-        .student-info input { width: 100%; padding: 12px 16px; border: 1px solid #eaeaea; border-radius: 6px; font-size: 0.95rem; background: #fafafa; transition: border-color 0.2s; }
-        .student-info input:focus { outline: none; border-color: #111; background: #fff; }
-        .info-message { background: #fafafa; color: #666; padding: 12px 16px; border-radius: 6px; border-left: 3px solid #ccc; margin-top: 15px; font-size: 0.85rem; }
-        .results-section { grid-column: 1 / -1; display: none; }
-        .results-section.show { display: block; }
-        .result-box { background: #fff; padding: 0; border: none; margin-bottom: 20px; }
-        .student-detail { margin-bottom: 30px; }
-        .student-detail h3 { font-size: 1.25rem; font-weight: 600; margin-bottom: 4px; }
-        .student-detail p { color: #888; font-size: 0.85rem; }
-        .scores-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 40px; }
-        @media (max-width: 768px) { .scores-grid { grid-template-columns: 1fr; } }
-        .score-card { background: #fafafa; padding: 24px; border-radius: 8px; border: 1px solid #eaeaea; text-align: left; display: flex; flex-direction: column; }
-        .score-card.overall { grid-column: 1 / -1; background: #fff; border-color: #111; }
-        .score-label { color: #666; font-size: 0.85rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: auto; padding-bottom: 12px; }
-        .score-value { font-size: 2.5rem; font-weight: 400; color: #111; margin-bottom: 16px; letter-spacing: -0.02em; }
-        .score-bar { height: 4px; background: #eee; border-radius: 2px; overflow: hidden; }
-        .score-fill { height: 100%; background: #111; border-radius: 2px; transition: width 0.8s ease-out; width: 0%; }
-        .feedback-box { background: #fafafa; padding: 24px; border-radius: 8px; border: 1px solid #eaeaea; margin-bottom: 15px; }
-        .feedback-box h4 { font-weight: 500; font-size: 0.95rem; margin-bottom: 8px; }
-        .star-rating { font-size: 1.5rem; margin: 12px 0; letter-spacing: 4px; color: #111; }
-        .feedback-box p { color: #555; font-size: 0.95rem; line-height: 1.5; }
-        .timestamp { color: #999; font-size: 0.8rem; margin-top: 4px; }
-        .history-section { grid-column: 1 / -1; }
-        .history-list { max-height: 400px; overflow-y: auto; }
-        .history-item { padding: 16px 0; border-bottom: 1px solid #eaeaea; display: flex; justify-content: space-between; align-items: center; }
-        .history-item:last-child { border-bottom: none; }
-        .history-item-info { flex: 1; }
-        .history-item-name { font-weight: 500; font-size: 0.95rem; margin-bottom: 2px; }
-        .history-item-details { font-size: 0.8rem; color: #888; }
-        .history-item-score { text-align: right; }
-        .history-item-score .score { font-size: 1.25rem; font-weight: 500; color: #111; }
-        .empty-message { text-align: center; color: #888; padding: 40px 20px; font-size: 0.9rem; }
-        .hidden { display: none; }
-        .loading-spinner { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(255, 255, 255, 0.9); display: flex; justify-content: center; align-items: center; z-index: 1000; backdrop-filter: blur(4px); }
-        .loading-spinner.hidden { display: none; }
-        .spinner { width: 40px; height: 40px; border: 3px solid #eee; border-top: 3px solid #111; border-radius: 50%; animation: spin 0.8s linear infinite; }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        .loading-spinner p { color: #111; margin-left: 20px; font-weight: 500; font-size: 0.95rem; letter-spacing: -0.01em; }
-        /* Modal styling */
-        .modal { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 2000; background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); }
-        .modal.hidden { display: none; }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dance Grading System</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+  <style>
+    /* ── Variables ───────────────────────────────────────────── */
+    :root {
+      --bg:       #0a0a0c;
+      --surface:  #111116;
+      --surface2: #18181f;
+      --surface3: #222230;
+      --border:   #2a2a3a;
+      --border2:  #3d3d52;
+      --text:     #e8e8f2;
+      --muted:    #6b6b85;
+      --accent:   #7c6af7;
+      --accent2:  #a594f9;
+      --green:    #22c55e;
+      --amber:    #f59e0b;
+      --red:      #ef4444;
+      --teal:     #14b8a6;
+    }
+
+    /* ── Reset ───────────────────────────────────────────────── */
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'DM Mono', monospace;
+      font-size: 14px;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    h1, h2, h3, h4, h5 { font-family: 'Syne', sans-serif; }
+
+    .hidden { display: none !important; }
+
+    /* ── Screen transitions ──────────────────────────────────── */
+    .screen { transition: opacity 0.28s ease; }
+    .screen-active { opacity: 1; }
+    .screen-hidden {
+      opacity: 0;
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      pointer-events: none;
+      visibility: hidden;
+    }
+
+    /* ══════════════════════════════════════════════════════════
+       SCREEN 1 — MOVEMENT SELECTION
+    ══════════════════════════════════════════════════════════ */
+    #screen1 { min-height: 100vh; }
+    .s1-inner {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 48px 40px 120px;
+    }
+
+    .s1-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 64px;
+    }
+
+    .logo {
+      font-family: 'Syne', sans-serif;
+      font-size: 1.5rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+    .logo span { color: var(--accent); }
+
+    .tagline {
+      font-size: 0.75rem;
+      color: var(--muted);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .s1-headline {
+      text-align: center;
+      margin-bottom: 56px;
+    }
+    .s1-headline h1 {
+      font-size: 2.8rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.15;
+      margin-bottom: 12px;
+    }
+    .s1-headline p {
+      font-size: 0.88rem;
+      color: var(--muted);
+      max-width: 420px;
+      margin: 0 auto;
+      line-height: 1.75;
+    }
+
+    .movement-group { margin-bottom: 40px; }
+
+    .group-label {
+      font-size: 0.68rem;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 14px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .group-label::before {
+      content: '';
+      width: 18px;
+      height: 1px;
+      background: var(--accent);
+      flex-shrink: 0;
+    }
+
+    .cards-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+
+    .mv-card {
+      padding: 18px 20px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      cursor: pointer;
+      transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+      user-select: none;
+    }
+    .mv-card:hover {
+      transform: translateY(-3px);
+      border-color: var(--accent);
+      box-shadow: 0 8px 24px rgba(124, 106, 247, 0.12);
+    }
+    .mv-card.selected {
+      background: rgba(124, 106, 247, 0.1);
+      border-color: var(--accent);
+    }
+    .mv-card.selected .mv-name { color: var(--accent2); }
+
+    .mv-name {
+      font-family: 'Syne', sans-serif;
+      font-size: 0.95rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      margin-bottom: 10px;
+      color: var(--text);
+      transition: color 0.18s;
+    }
+
+    .mv-joints {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-bottom: 12px;
+    }
+    .joint-chip {
+      font-size: 0.65rem;
+      padding: 2px 7px;
+      border-radius: 100px;
+      background: var(--surface3);
+      color: var(--muted);
+      border: 1px solid var(--border);
+      letter-spacing: 0.03em;
+    }
+
+    .mv-weight-bar {
+      display: flex;
+      height: 3px;
+      border-radius: 2px;
+      overflow: hidden;
+      margin-bottom: 10px;
+      gap: 1px;
+    }
+    .wb-wiraga { background: var(--accent); border-radius: 2px 0 0 2px; }
+    .wb-wirama { background: var(--teal); }
+    .wb-power  { background: var(--amber); border-radius: 0 2px 2px 0; }
+
+    .mv-desc {
+      font-size: 0.72rem;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    /* Screen 1 footer */
+    .s1-footer {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      padding: 16px 40px 24px;
+      background: linear-gradient(to top, var(--bg) 60%, transparent);
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 18px;
+      pointer-events: none;
+      z-index: 50;
+    }
+    .s1-footer > * { pointer-events: all; }
+
+    .selected-badge {
+      font-size: 0.8rem;
+      color: var(--muted);
+      opacity: 0;
+      transition: opacity 0.25s;
+    }
+    .selected-badge.visible { opacity: 1; }
+
+    .btn-continue {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 30px;
+      border-radius: 8px;
+      border: none;
+      background: var(--accent);
+      color: #fff;
+      font-family: 'Syne', sans-serif;
+      font-size: 0.9rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity 0.18s, transform 0.18s, box-shadow 0.18s;
+      letter-spacing: -0.01em;
+    }
+    .btn-continue:disabled { opacity: 0.28; cursor: not-allowed; transform: none !important; }
+    .btn-continue:not(:disabled):hover {
+      opacity: 0.88;
+      transform: translateY(-1px);
+      box-shadow: 0 8px 24px rgba(124, 106, 247, 0.35);
+    }
+
+    /* ══════════════════════════════════════════════════════════
+       SCREEN 2 — UPLOAD & RESULTS
+    ══════════════════════════════════════════════════════════ */
+    #screen2 { min-height: 100vh; display: flex; flex-direction: column; }
+
+    /* Top bar */
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(10, 10, 12, 0.88);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 32px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .topbar-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-shrink: 0;
+    }
+    .back-btn {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      cursor: pointer;
+      background: none;
+      border: none;
+      padding: 0;
+      transition: color 0.15s;
+    }
+    .back-btn:hover { color: var(--text); }
+    .topbar-logo {
+      font-family: 'Syne', sans-serif;
+      font-size: 1rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+    .topbar-logo span { color: var(--accent); }
+    .topbar-sep { width: 1px; height: 18px; background: var(--border2); }
+    .topbar-center { flex: 1; display: flex; justify-content: center; }
+    .movement-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 14px;
+      border-radius: 100px;
+      background: rgba(124, 106, 247, 0.1);
+      border: 1px solid rgba(124, 106, 247, 0.25);
+      font-size: 0.75rem;
+    }
+    .badge-name {
+      font-family: 'Syne', sans-serif;
+      font-weight: 700;
+      color: var(--accent2);
+    }
+    .badge-joints { color: var(--muted); font-size: 0.68rem; }
+    .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .btn-logout {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 12px;
+      border-radius: 100px;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-family: 'DM Mono', monospace;
+      font-size: 0.7rem;
+      cursor: pointer;
+      text-decoration: none;
+      transition: border-color 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    .btn-logout:hover { border-color: var(--border2); color: var(--text); }
+    .status-chip {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 100px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      font-size: 0.7rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .status-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--amber);
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .status-dot.ready { background: var(--green); }
+
+    /* Main content wrapper */
+    .s2-content {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 40px 32px 80px;
+      width: 100%;
+    }
+
+    /* Section label */
+    .section-label {
+      font-size: 0.65rem;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 18px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .section-label::before {
+      content: '';
+      width: 14px;
+      height: 1px;
+      background: var(--accent);
+      flex-shrink: 0;
+    }
+
+    /* Upload grid */
+    .upload-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      margin-bottom: 52px;
+    }
+    .upload-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 26px;
+    }
+    .upload-card-title {
+      font-family: 'Syne', sans-serif;
+      font-size: 0.9rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      margin-bottom: 3px;
+    }
+    .upload-card-sub {
+      font-size: 0.73rem;
+      color: var(--muted);
+      margin-bottom: 18px;
+    }
+
+    .dropzone {
+      border: 1px dashed var(--border2);
+      border-radius: 8px;
+      padding: 28px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      margin-bottom: 12px;
+    }
+    .dropzone:hover, .dropzone.dragover {
+      border-color: var(--accent);
+      background: rgba(124, 106, 247, 0.04);
+    }
+    .dz-icon {
+      width: 32px; height: 32px;
+      margin: 0 auto 10px;
+      color: var(--muted);
+    }
+    .dropzone h3 {
+      font-family: 'Syne', sans-serif;
+      font-size: 0.82rem;
+      font-weight: 600;
+      margin-bottom: 3px;
+    }
+    .dropzone p { font-size: 0.7rem; color: var(--muted); }
+
+    .upload-success {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: rgba(34, 197, 94, 0.07);
+      border: 1px solid rgba(34, 197, 94, 0.18);
+      margin-bottom: 12px;
+      font-size: 0.75rem;
+    }
+    .upload-success.show { display: flex; }
+    .upload-success-name { color: var(--green); font-weight: 600; }
+    .upload-success-meta { color: var(--muted); font-size: 0.7rem; }
+
+    .input-label {
+      display: block;
+      font-size: 0.68rem;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+    }
+    .input-field {
+      width: 100%;
+      padding: 9px 13px;
+      border: 1px solid var(--border2);
+      border-radius: 8px;
+      background: var(--surface2);
+      color: var(--text);
+      font-family: 'DM Mono', monospace;
+      font-size: 0.82rem;
+      margin-bottom: 12px;
+      outline: none;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .input-field:focus { border-color: var(--accent); background: var(--surface3); }
+    .input-field::placeholder { color: var(--muted); }
+
+    .btn-upload {
+      width: 100%;
+      padding: 10px 18px;
+      border-radius: 8px;
+      border: 1px solid var(--border2);
+      background: var(--surface3);
+      color: var(--text);
+      font-family: 'Syne', sans-serif;
+      font-size: 0.82rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.18s, border-color 0.18s;
+      letter-spacing: -0.01em;
+    }
+    .btn-upload:hover:not(:disabled) { background: var(--surface2); border-color: var(--accent); }
+    .btn-upload:disabled { opacity: 0.3; cursor: not-allowed; }
+    .btn-upload.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn-upload.primary:hover:not(:disabled) { opacity: 0.85; background: var(--accent); }
+
+    .start-marker-panel {
+      display: none;
+      margin-top: 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--surface2);
+    }
+    .start-marker-panel.visible { display: block; }
+    .start-marker-video { width: 100%; max-height: 160px; background: #000; display: block; object-fit: contain; }
+    .start-marker-controls {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 10px; flex-wrap: wrap;
+    }
+    .smc-time {
+      font-family: 'DM Mono', monospace; font-size: 0.82rem;
+      color: var(--text); min-width: 38px;
+    }
+    .smc-label {
+      font-size: 0.72rem; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.06em; flex: 1;
+    }
+    .smc-tag {
+      font-family: 'DM Mono', monospace; font-size: 0.75rem;
+      background: rgba(124,106,247,0.15); color: var(--accent);
+      border: 1px solid var(--accent); border-radius: 100px;
+      padding: 2px 9px; white-space: nowrap;
+    }
+    .smc-tag.auto { background: rgba(34,197,94,0.12); color: var(--green); border-color: var(--green); }
+    .btn-smc {
+      padding: 4px 11px; border-radius: 100px; font-size: 0.72rem;
+      font-family: 'DM Mono', monospace; cursor: pointer;
+      border: 1px solid var(--border); background: var(--surface3);
+      color: var(--text); transition: border-color 0.15s;
+    }
+    .btn-smc:hover { border-color: var(--accent); color: var(--accent); }
+    .btn-smc.set { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn-smc.set:hover { opacity: 0.85; }
+
+    .warning-msg {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-top: 10px;
+      padding: 8px 12px;
+      border-radius: 7px;
+      background: rgba(245, 158, 11, 0.07);
+      border: 1px solid rgba(245, 158, 11, 0.18);
+      font-size: 0.73rem;
+      color: var(--amber);
+    }
+
+    /* ── Results ─────────────────────────────────────────────── */
+    #resultsSection { display: none; margin-bottom: 52px; }
+    #resultsSection.show { display: block; }
+
+    .move-banner {
+      padding: 16px 20px;
+      border-radius: 10px;
+      background: rgba(124, 106, 247, 0.06);
+      border: 1px solid rgba(124, 106, 247, 0.18);
+      margin-bottom: 28px;
+    }
+    .move-banner-top {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+    .move-banner-name {
+      font-family: 'Syne', sans-serif;
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--accent2);
+    }
+    .banner-chip {
+      font-size: 0.65rem;
+      padding: 2px 10px;
+      border-radius: 100px;
+      background: rgba(124, 106, 247, 0.14);
+      border: 1px solid rgba(124, 106, 247, 0.22);
+      color: var(--accent2);
+    }
+    .move-banner-cue { font-size: 0.78rem; color: var(--muted); line-height: 1.6; margin-bottom: 6px; }
+    .move-banner-weights { font-size: 0.7rem; color: var(--accent); letter-spacing: 0.05em; }
+
+    .result-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 24px;
+      gap: 12px;
+    }
+    .result-name {
+      font-family: 'Syne', sans-serif;
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .result-meta { font-size: 0.73rem; color: var(--muted); margin-top: 3px; }
+    .result-time { font-size: 0.7rem; color: var(--muted); text-align: right; flex-shrink: 0; }
+
+    /* Score cards */
+    .scores-row {
+      display: grid;
+      grid-template-columns: 1.6fr 1fr 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .score-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px 20px;
+    }
+    .score-card.overall { border-top: 2px solid var(--accent); }
+    .sc-label {
+      font-size: 0.62rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      margin-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .sc-weight { font-size: 0.58rem; text-transform: none; letter-spacing: 0; color: var(--muted); }
+    .sc-value {
+      font-family: 'Syne', sans-serif;
+      font-size: 2.1rem;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      margin-bottom: 12px;
+      line-height: 1;
+    }
+    .score-card.overall .sc-value { font-size: 2.7rem; }
+    .sc-bar { height: 3px; background: var(--surface3); border-radius: 2px; overflow: hidden; }
+    .sc-fill {
+      height: 100%;
+      border-radius: 2px;
+      width: 0%;
+      transition: width 0.72s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .score-green { color: var(--green); }
+    .score-blue  { color: #818cf8; }
+    .score-amber { color: var(--amber); }
+    .score-red   { color: var(--red); }
+    .fill-green  { background: var(--green); }
+    .fill-blue   { background: #818cf8; }
+    .fill-amber  { background: var(--amber); }
+    .fill-red    { background: var(--red); }
+
+    .regional-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .regional-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; }
+    .regional-card.dimmed { opacity: 0.38; }
+
+    /* Feedback card */
+    .feedback-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 22px;
+      margin-bottom: 22px;
+    }
+    .feedback-card h4 {
+      font-family: 'Syne', sans-serif;
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+    .star-display { font-size: 1.2rem; letter-spacing: 3px; margin-bottom: 8px; }
+    .feedback-text { font-size: 0.85rem; color: var(--text); line-height: 1.75; }
+    .detailed-feedback-area { margin-top: 18px; }
+
+    /* Generalized feedback section */
+    .generalized-feedback-section {
+      margin-top: 22px;
+      padding: 24px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin-bottom: 22px;
+    }
+    .generalized-feedback-section .section-title {
+      font-family: 'Syne', sans-serif;
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-bottom: 18px;
+      color: var(--text);
+    }
+    .feedback-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .feedback-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      padding: 14px 16px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      border-left: 3px solid;
+    }
+    .feedback-item.severity-high { border-left-color: #ef4444; }
+    .feedback-item.severity-med  { border-left-color: #f59e0b; }
+    .feedback-item.severity-low  { border-left-color: #22c55e; }
+    .feedback-badge {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 3px 10px;
+      border-radius: 100px;
+      flex-shrink: 0;
+    }
+    .feedback-badge.wiraga {
+      background: rgba(124,106,247,0.15);
+      color: var(--accent2);
+      border: 1px solid rgba(124,106,247,0.3);
+    }
+    .feedback-badge.wirama {
+      background: rgba(34,197,94,0.12);
+      color: #4ade80;
+      border: 1px solid rgba(34,197,94,0.25);
+    }
+    .feedback-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .feedback-message {
+      font-size: 0.92rem;
+      line-height: 1.5;
+      color: var(--text);
+    }
+    .feedback-toggle {
+      align-self: flex-start;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 100px;
+      color: var(--muted);
+      font-family: 'DM Mono', monospace;
+      font-size: 0.72rem;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s, background 0.15s;
+    }
+    .feedback-toggle:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .feedback-toggle.active {
+      background: rgba(124,106,247,0.1);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .toggle-icon { font-size: 0.85rem; line-height: 1; }
+    .feedback-empty {
+      text-align: center;
+      padding: 24px;
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    /* Custom video player */
+    .custom-video-player {
+      width: 100%;
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .custom-video-player video {
+      width: 100%;
+      display: block;
+    }
+    .custom-controls {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 14px;
+      background: rgba(0,0,0,0.85);
+      backdrop-filter: blur(8px);
+    }
+    .ctrl-btn {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      font-size: 0.85rem;
+      cursor: pointer;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    .ctrl-btn:hover { background: var(--accent2); }
+    .time-display {
+      font-family: 'DM Mono', monospace;
+      font-size: 0.78rem;
+      color: var(--muted);
+      min-width: 90px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+    .progress-container {
+      flex: 1;
+      position: relative;
+      height: 14px;
+      background: rgba(255,255,255,0.12);
+      border-radius: 7px;
+      cursor: pointer;
+    }
+    .progress-fill {
+      position: absolute;
+      top: 0; left: 0;
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      border-radius: 7px;
+      pointer-events: none;
+      transition: width 0.05s linear;
+    }
+    .progress-thumb {
+      position: absolute;
+      top: 50%;
+      left: 0%;
+      transform: translate(-50%, -50%);
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 0 4px rgba(0,0,0,0.6);
+      pointer-events: none;
+      z-index: 3;
+    }
+    .markers-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 2;
+      border-radius: 7px;
+      overflow: hidden;
+    }
+    .timeline-marker {
+      position: absolute;
+      top: -3px;
+      bottom: -3px;
+      border-radius: 3px;
+      pointer-events: auto;
+      cursor: pointer;
+      opacity: 0.9;
+      transition: opacity 0.15s, transform 0.1s;
+      z-index: 4;
+    }
+    .timeline-marker:hover { opacity: 1; transform: scaleY(1.15); }
+    .timeline-marker.marker-high { background: #ef4444; }
+    .timeline-marker.marker-med  { background: #f59e0b; }
+    .timeline-marker.marker-low  { background: #22c55e; }
+
+    /* Btn compatibility for dynamically-generated player HTML */
+    .btn {
+      padding: 6px 14px;
+      border-radius: 6px;
+      border: 1px solid var(--border2);
+      background: var(--surface2);
+      color: var(--text);
+      font-family: 'DM Mono', monospace;
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+    .btn:hover { border-color: var(--accent); }
+    .btn-small { padding: 5px 11px; font-size: 0.7rem; }
+
+    .btn-grade-another {
+      padding: 11px 26px;
+      border-radius: 8px;
+      border: 1px solid var(--border2);
+      background: transparent;
+      color: var(--text);
+      font-family: 'Syne', sans-serif;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: border-color 0.18s, background 0.18s;
+      margin-bottom: 52px;
+      letter-spacing: -0.01em;
+    }
+    .btn-grade-another:hover {
+      border-color: var(--accent);
+      background: rgba(124, 106, 247, 0.06);
+    }
+
+    /* History */
+    .history-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 22px;
+    }
+    .history-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+    .history-title {
+      font-family: 'Syne', sans-serif;
+      font-size: 0.9rem;
+      font-weight: 700;
+    }
+    .btn-clear {
+      padding: 5px 13px;
+      border-radius: 6px;
+      border: 1px solid var(--border2);
+      background: transparent;
+      color: var(--muted);
+      font-family: 'DM Mono', monospace;
+      font-size: 0.72rem;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .btn-clear:hover { color: var(--red); border-color: var(--red); }
+
+    .history-table { width: 100%; border-collapse: collapse; }
+    .history-table th {
+      text-align: left;
+      font-size: 0.62rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      padding: 0 10px 11px;
+      font-weight: 500;
+      border-bottom: 1px solid var(--border);
+    }
+    .history-table td {
+      padding: 11px 10px;
+      font-size: 0.78rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .history-table tr:last-child td { border-bottom: none; }
+    .history-row { transition: background 0.15s; }
+    .history-row:hover td { background: var(--surface2); }
+    .btn-history-expand {
+      padding: 3px 10px; border-radius: 100px; font-size: 0.72rem;
+      border: 1px solid var(--border); background: var(--surface3);
+      color: var(--muted); cursor: pointer; transition: color 0.15s, border-color 0.15s;
+    }
+    .btn-history-expand:hover { color: var(--text); border-color: var(--border2); }
+    .history-detail-row td { padding: 0; }
+    .history-detail-cell {
+      background: var(--surface2);
+      border-bottom: 1px solid var(--border);
+      padding: 0 !important;
+    }
+
+    .mv-pill {
+      display: inline-flex;
+      padding: 2px 8px;
+      border-radius: 100px;
+      font-size: 0.63rem;
+      background: var(--surface3);
+      border: 1px solid var(--border2);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .score-pill {
+      font-family: 'Syne', sans-serif;
+      font-size: 1rem;
+      font-weight: 700;
+    }
+    .empty-msg {
+      text-align: center;
+      padding: 40px 20px;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+
+    /* ══════════════════════════════════════════════════════════
+       LOADING OVERLAY
+    ══════════════════════════════════════════════════════════ */
+    #loadingSpinner {
+      position: fixed;
+      inset: 0;
+      background: rgba(10, 10, 12, 0.93);
+      backdrop-filter: blur(22px);
+      -webkit-backdrop-filter: blur(22px);
+      z-index: 9000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #loadingSpinner.hidden { display: none; }
+    .loading-inner { max-width: 320px; width: 100%; text-align: center; }
+    .loading-ring {
+      width: 44px; height: 44px;
+      border: 2px solid var(--border2);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.75s linear infinite;
+      margin: 0 auto 22px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-title {
+      font-family: 'Syne', sans-serif;
+      font-size: 0.95rem;
+      font-weight: 700;
+      margin-bottom: 22px;
+      color: var(--text);
+    }
+    .loading-stages { display: flex; flex-direction: column; gap: 10px; text-align: left; }
+    .lstg {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 0.78rem;
+      color: var(--border2);
+      transition: color 0.3s;
+    }
+    .lstg.active { color: var(--text); }
+    .lstg.done   { color: var(--green); }
+    .lstg-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+    .lstg.active .lstg-dot { animation: pulse-dot 0.7s infinite; }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.2} }
+    .loading-hint { margin-top: 18px; font-size: 0.68rem; color: var(--muted); }
+
+    /* ══════════════════════════════════════════════════════════
+       TOAST
+    ══════════════════════════════════════════════════════════ */
+    #toastContainer {
+      position: fixed;
+      bottom: 24px; right: 24px;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      pointer-events: none;
+    }
+    .toast {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 12px 16px;
+      border-radius: 8px;
+      background: var(--surface2);
+      border: 1px solid var(--border2);
+      color: var(--text);
+      font-size: 0.8rem;
+      max-width: 320px;
+      pointer-events: all;
+      animation: toast-in 0.22s ease;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+    }
+    .toast.error   { border-color: rgba(239, 68, 68, 0.5); }
+    .toast.success { border-color: rgba(34, 197, 94, 0.4); }
+    .toast-msg { flex: 1; line-height: 1.5; }
+    .toast-close {
+      cursor: pointer;
+      color: var(--muted);
+      background: none;
+      border: none;
+      font-size: 1rem;
+      line-height: 1;
+      padding: 0;
+      flex-shrink: 0;
+      transition: color 0.15s;
+    }
+    .toast-close:hover { color: var(--text); }
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ══════════════════════════════════════════════════════════
+       VIEWER MODAL
+    ══════════════════════════════════════════════════════════ */
+
+    /* ── Responsive ──────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .cards-grid { grid-template-columns: repeat(2, 1fr); }
+      .scores-row { grid-template-columns: 1fr 1fr; }
+      .score-card.overall { grid-column: 1 / -1; }
+      .upload-grid { grid-template-columns: 1fr; }
+      .viewer-videos { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 600px) {
+      .cards-grid { grid-template-columns: 1fr; }
+      .regional-row { grid-template-columns: 1fr; }
+      .s1-inner { padding: 24px 16px 100px; }
+      .s2-content { padding: 24px 16px 60px; }
+      .topbar { padding: 0 16px; }
+      .s1-footer { padding: 12px 16px 20px; }
+      .tagline { display: none; }
+    }
+
+    /* ── Scrollbars ──────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <!-- Header -->
-        <header class="header">
-            <div class="header-content">
-                <h1>💃 Dance Grading System</h1>
-                <p>Upload videos and get instant dance performance grades</p>
-            </div>
-            <div class="status-bar" id="statusBar">
-                <span id="teacherStatus" class="status-item">
-                    <span class="status-indicator waiting"></span>
-                    Teacher Reference: Not Set
-                </span>
-                <span id="studentStatus" class="status-item">
-                    <span class="status-indicator waiting"></span>
-                    Students Graded: 0
-                </span>
-            </div>
-        </header>
-        <div class="content">
-            <!-- Teacher Section -->
-            <section class="card teacher-section">
-                <div class="section-header">
-                    <h2>👨‍🏫 Teacher Reference</h2>
-                    <p class="subtitle">Upload the teacher's dance video to create a reference</p>
-                </div>
 
-                <div class="student-info" style="visibility: hidden;">
-                    <label>Spacer</label>
-                    <input type="text" disabled>
-                </div>
+<!-- ═══════════════════════════════════════ SCREEN 1 ══════════ -->
+<div id="screen1" class="screen screen-active">
+  <div class="s1-inner">
+    <div class="s1-header">
+      <div>
+        <div class="logo">DG<span>S</span></div>
+        <div class="tagline">Dance Grading System · AI-powered analysis</div>
+      </div>
+      <a href="{{ url_for('auth.logout') }}" class="btn-logout">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+          <polyline points="16 17 21 12 16 7"/>
+          <line x1="21" y1="12" x2="9" y2="12"/>
+        </svg>
+        Logout
+      </a>
+    </div>
 
-                <div class="upload-area" id="teacherUpload">
-                    <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                        <polyline points="17 8 12 3 7 8"></polyline>
-                        <line x1="12" y1="3" x2="12" y2="15"></line>
-                    </svg>
-                    <h3>Click to upload or drag and drop</h3>
-                    <p>MP4, AVI, MOV, MKV (Max 500MB)</p>
-                    <input type="file" id="teacherFile" accept="video/*" style="display: none;">
-                </div>
+    <div class="s1-headline">
+      <h1>Choose your basic movement, <span style="color:var(--accent)">{{ user.full_name.split()[0] }}</span></h1>
+      <p>Three foundational hip hop moves validated by expert coaches. Each scored on Wiraga (form) and Wirama (timing).</p>
+    </div>
 
-                <div id="teacherResult" class="upload-result hidden">
-                    <div class="success-message">
-                        <svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                            <polyline points="20 6 9 17 4 12"></polyline>
-                        </svg>
-                        <div>
-                            <h4>✓ Teacher Reference Created</h4>
-                            <p id="teacherFrames">Frames extracted: --</p>
-                        </div>
-                    </div>
-                </div>
+    <div class="movement-group">
+      <div class="cards-grid" id="group-basic"></div>
+    </div>
+  </div>
 
-                <button id="teacherBtn" class="btn btn-primary">Upload Teacher Video</button>
-            </section>
+  <div class="s1-footer">
+    <span class="selected-badge" id="selectedBadge"></span>
+    <button class="btn-continue" id="continueBtn" disabled>Continue <span>→</span></button>
+  </div>
+</div>
 
-            <!-- Student Section -->
-            <section class="card student-section">
-                <div class="section-header">
-                    <h2>👨‍🎓 Student Grading</h2>
-                    <p class="subtitle">Upload student videos to grade their performance</p>
-                </div>
+<!-- ═══════════════════════════════════════ SCREEN 2 ══════════ -->
+<div id="screen2" class="screen screen-hidden">
 
-                <div class="student-info">
-                    <label for="studentName">Student Name (Optional)</label>
-                    <input type="text" id="studentName" placeholder="Enter student name" maxlength="50" style="margin-bottom: 15px;">
-                    
-                    <label for="movementType">Target Movement Type</label>
-                    <select id="movementType" style="width: 100%; padding: 12px 16px; border: 1px solid #eaeaea; border-radius: 6px; font-size: 0.95rem; background: #fafafa; transition: border-color 0.2s;">
-                        <option value="auto">Auto-detect Movement</option>
-                        <option value="bounce">Bounce (Hips, Knees, Spine)</option>
-                        <option value="groove">Groove (Hips, Knees, Spine mostly)</option>
-                        <option value="arm_wave">Arm Wave (Arms only)</option>
-                        <option value="chest_pop">Chest Pop (Shoulders, Spine)</option>
-                        <option value="footwork">Footwork (Legs only)</option>
-                        <option value="freeze">Freeze/Isolations (Full body holds)</option>
-                        <option value="full_body">Full Body (General Choreography)</option>
-                    </select>
-                </div>
+  <!-- Sticky Top Bar -->
+  <div class="topbar">
+    <div class="topbar-left">
+      <button class="back-btn" id="backBtn">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <polyline points="15 18 9 12 15 6"/>
+        </svg>
+        Back
+      </button>
+      <div class="topbar-sep"></div>
+      <div class="topbar-logo">DG<span>S</span></div>
+    </div>
+    <div class="topbar-center">
+      <div class="movement-badge">
+        <span class="badge-name" id="badgeName">—</span>
+        <span class="badge-joints" id="badgeJoints"></span>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <div class="status-chip">
+        <span class="status-dot" id="refDot"></span>
+        <span id="refStatusText">References: 0/3</span>
+      </div>
+      <div class="status-chip">
+        <span class="status-dot" id="studentDot"></span>
+        <span id="studentStatusText">0 graded</span>
+      </div>
+      <a href="{{ url_for('auth.logout') }}" class="btn-logout">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+          <polyline points="16 17 21 12 16 7"/>
+          <line x1="21" y1="12" x2="9" y2="12"/>
+        </svg>
+        Logout
+      </a>
+    </div>
+  </div>
 
-                <div class="upload-area" id="studentUpload">
-                    <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                        <polyline points="17 8 12 3 7 8"></polyline>
-                        <line x1="12" y1="3" x2="12" y2="15"></line>
-                    </svg>
-                    <h3>Click to upload or drag and drop</h3>
-                    <p>MP4, AVI, MOV, MKV (Max 500MB)</p>
-                    <input type="file" id="studentFile" accept="video/*" style="display: none;">
-                </div>
+  <!-- Main Content -->
+  <div class="s2-content">
 
-                <button id="studentBtn" class="btn btn-primary" disabled>
-                    Upload Student Video
-                </button>
+    <!-- A: Upload -->
+    <div class="section-label">Upload</div>
+    <div class="upload-grid">
 
-                <p class="info-message" id="teacherWarning">⚠️ Please upload teacher reference first</p>
-            </section>
+      <!-- Reference Video Preview -->
+      <div class="upload-card ref-preview-card">
+        <div class="upload-card-title">Reference — <span id="refCardMoveName">—</span></div>
+        <div class="upload-card-sub" id="refCardSub">Loading reference…</div>
+        <div class="ref-video-wrapper" id="refVideoWrapper">
+          <video id="refVideo" autoplay muted loop playsinline
+            style="width:100%;border-radius:8px;background:#000;display:block;min-height:180px"></video>
+          <div style="position:absolute;left:8px;top:8px;background:rgba(10,10,12,0.8);
+            color:var(--accent2);padding:2px 8px;border-radius:999px;font-size:0.65rem;
+            font-family:'Syne',sans-serif;letter-spacing:0.08em;text-transform:uppercase">
+            REFERENCE
+          </div>
+          <div id="refNotAvailable" style="display:none;padding:40px 16px;text-align:center;
+            color:var(--muted);font-size:0.8rem">
+            No reference available for this movement
+          </div>
+        </div>
+      </div>
+
+      <!-- Student -->
+      <div class="upload-card">
+        <div class="upload-card-title">Student Video</div>
+        <div class="upload-card-sub">Upload student's video for grading</div>
+        <label class="input-label" for="studentName">Student name (optional)</label>
+        <input type="text" class="input-field" id="studentName" placeholder="Enter name…" maxlength="50">
+        <div class="dropzone" id="studentUpload">
+          <svg class="dz-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          <h3>Click or drag to upload</h3>
+          <p>MP4, AVI, MOV, MKV · Max 500 MB</p>
+          <input type="file" id="studentFile" accept="video/mp4,video/quicktime,video/x-msvideo,video/x-matroska,video/webm,.mp4,.mov,.avi,.mkv,.webm" style="display:none">
+        </div>
+        <!-- Start marker panel (Option B auto + Option C manual) -->
+        <div class="start-marker-panel" id="startMarkerPanel">
+          <video class="start-marker-video" id="startMarkerVideo" muted preload="metadata"></video>
+          <div class="start-marker-controls">
+            <button class="btn-smc" id="smcPlayBtn" title="Play/Pause">&#9654;</button>
+            <span class="smc-time" id="smcTime">0:00</span>
+            <span class="smc-label">Scrub to where dancing starts</span>
+            <button class="btn-smc set" id="smcSetBtn">Set start</button>
+            <button class="btn-smc" id="smcResetBtn">Auto</button>
+          </div>
+          <div style="padding:0 10px 8px;display:flex;align-items:center;gap:8px">
+            <span style="font-size:0.7rem;color:var(--muted)">Start from:</span>
+            <span class="smc-tag auto" id="smcStartTag">auto-detect</span>
+          </div>
         </div>
 
-        <!-- Results Section -->
-        <section class="card results-section hidden" id="resultsSection">
-            <div class="section-header">
-                <h2>📊 Grading Results</h2>
-            </div>
-
-            <div class="result-box">
-                <div class="student-detail">
-                    <h3 id="resultName">Student Name</h3>
-                    <p id="resultFrames">Frames: --</p>
-                </div>
-
-                <div class="scores-grid">
-                    <div class="score-card overall">
-                        <div class="score-label">Overall Score <span style="text-transform:none; font-weight:normal; color:#888;">(35% Timing + 35% Movement + 30% Power)</span></div>
-                        <div class="score-value" id="overallScore">0</div>
-                        <div class="score-bar">
-                            <div class="score-fill" id="overallFill"></div>
-                        </div>
-                    </div>
-
-                    <div class="score-card" style="border-top: 3px solid #10b981;">
-                        <div class="score-label">Musicality (Timing)</div>
-                        <div class="score-value" id="timingScore">0</div>
-                        <div class="score-bar">
-                            <div class="score-fill" id="timingFill" style="background:#10b981;"></div>
-                        </div>
-                    </div>
-
-                    <div class="score-card" style="border-top: 3px solid #3b82f6;">
-                        <div class="score-label">Movement Quality</div>
-                        <div class="score-value" id="movementScore">0</div>
-                        <div class="score-bar">
-                            <div class="score-fill" id="movementFill" style="background:#3b82f6;"></div>
-                        </div>
-                    </div>
-
-                    <div class="score-card" style="border-top: 3px solid #f59e0b;">
-                        <div class="score-label">Power / Dynamics</div>
-                        <div class="score-value" id="powerScore">0</div>
-                        <div class="score-bar">
-                            <div class="score-fill" id="powerFill" style="background:#f59e0b;"></div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="section-header" style="margin-top: 20px;">
-                    <h3 style="font-size:1rem;color:#444;">Movement Regional Details</h3>
-                </div>
-                <div class="scores-grid">
-                    <div class="score-card">
-                        <div class="score-label">Arm Score</div>
-                        <div class="score-value" id="armScore">0</div>
-                        <div class="score-bar">
-                            <div class="score-fill" id="armFill"></div>
-                        </div>
-                    </div>
-
-                    <div class="score-card">
-                        <div class="score-label">Leg Score</div>
-                        <div class="score-value" id="legScore">0</div>
-                        <div class="score-bar">
-                            <div class="score-fill" id="legFill"></div>
-                        </div>
-                    </div>
-
-                    <div class="score-card">
-                        <div class="score-label">Torso Score</div>
-                        <div class="score-value" id="torsoScore">0</div>
-                        <div class="score-bar">
-                            <div class="score-fill" id="torsoFill"></div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="feedback-box">
-                    <h4>Feedback</h4>
-                    <div class="star-rating" id="starRating"></div>
-                    <p id="feedbackText"></p>
-                    <div id="detailedFeedback" style="margin-top:12px;color:#334155;font-size:0.95em"></div>
-                </div>
-
-                <div class="timestamp">
-                    <small id="resultTime"></small>
-                </div>
-            </div>
-
-            <button id="gradeAnotherBtn" class="btn btn-secondary">Grade Another Student</button>
-        </section>
-
-        <!-- History Section -->
-        <section class="card history-section">
-            <div class="section-header">
-                <h2>📈 Grading History</h2>
-                <button id="clearHistoryBtn" class="btn btn-small">Clear</button>
-            </div>
-
-            <div id="historyList" class="history-list">
-                <p class="empty-message">No grading history yet</p>
-            </div>
-        </section>
-    </div>
-
-    <!-- Loading Spinner -->
-    <div id="loadingSpinner" class="loading-spinner hidden">
-        <div class="spinner"></div>
-        <p>Processing video...</p>
-    </div>
-
-    <!-- Modal Messages -->
-    <div id="errorModal" class="modal hidden">
-        <div class="modal-content error">
-            <h3>❌ Error</h3>
-            <p id="errorMessage"></p>
-            <button class="btn btn-small" onclick="closeModal('errorModal')">Dismiss</button>
+        <button class="btn-upload primary" id="studentBtn">Grade Student</button>
+        <div class="warning-msg" id="refWarning" style="display:none">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+          <span id="refWarningText">Reference not available for this movement</span>
         </div>
+      </div>
     </div>
 
-    <div id="successModal" class="modal hidden">
-        <div class="modal-content success">
-            <h3>✓ Success</h3>
-            <p id="successMessage"></p>
-            <button class="btn btn-small" onclick="closeModal('successModal')">OK</button>
+    <!-- B: Results -->
+    <section id="resultsSection">
+      <div class="section-label">Results</div>
+
+      <!-- Move context banner -->
+      <div class="move-banner" id="moveContextBanner" style="display:none">
+        <div class="move-banner-top">
+          <span class="move-banner-name" id="moveContextName"></span>
+          <span class="banner-chip" id="moveContextJoints"></span>
         </div>
-    </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
-    <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            setupEventListeners();
-            loadStatus();
-            loadHistory();
-        });
-
-        const poseOverlaySessions = {};
-        const syncPairSessions = {};
-        let showTeacherOverlay = true;
-
-        function updateTeacherOverlayButtons() {
-            const label = showTeacherOverlay ? 'Hide Teacher Bones' : 'Show Teacher Bones';
-            const btnIds = ['teacherOverlayToggle', 'viewerTeacherOverlayToggle'];
-            btnIds.forEach((id) => {
-                const btn = document.getElementById(id);
-                if (btn) btn.textContent = label;
-            });
-        }
-
-        function toggleTeacherOverlay() {
-            showTeacherOverlay = !showTeacherOverlay;
-            updateTeacherOverlayButtons();
-        }
-
-        function syncOverlayCanvas(videoEl, canvasEl) {
-            if (!videoEl || !canvasEl) return;
-            const rect = videoEl.getBoundingClientRect();
-            const w = Math.max(1, Math.round(rect.width));
-            const h = Math.max(1, Math.round(rect.height));
-            if (canvasEl.width !== w || canvasEl.height !== h) {
-                canvasEl.width = w;
-                canvasEl.height = h;
-            }
-        }
-
-        function drawPivotMarkers(ctx, landmarks, role, width, height) {
-            if (!landmarks || !landmarks.length) return;
-
-            const pivotIds = [
-                11, 12, // shoulders
-                13, 14, // elbows
-                15, 16, // wrists
-                23, 24, // hips
-                25, 26, // knees
-                27, 28  // ankles
-            ];
-
-            const ringColor = role === 'teacher' ? '#1d4ed8' : '#ea580c';
-            const fillColor = role === 'teacher' ? '#93c5fd' : '#fdba74';
-            const radius = role === 'teacher' ? 4 : 5;
-
-            ctx.save();
-            for (const idx of pivotIds) {
-                const lm = landmarks[idx];
-                if (!lm) continue;
-                if (typeof lm.visibility === 'number' && lm.visibility < 0.35) continue;
-
-                const x = lm.x * width;
-                const y = lm.y * height;
-
-                ctx.beginPath();
-                ctx.arc(x, y, radius + 2, 0, Math.PI * 2);
-                ctx.fillStyle = 'rgba(255,255,255,0.8)';
-                ctx.fill();
-
-                ctx.beginPath();
-                ctx.arc(x, y, radius, 0, Math.PI * 2);
-                ctx.fillStyle = fillColor;
-                ctx.fill();
-                ctx.lineWidth = 1.5;
-                ctx.strokeStyle = ringColor;
-                ctx.stroke();
-            }
-            ctx.restore();
-        }
-
-        async function startPoseOverlay(videoId, canvasId, options = {}) {
-            const videoEl = document.getElementById(videoId);
-            const canvasEl = document.getElementById(canvasId);
-            if (!videoEl || !canvasEl) return;
-            const role = options.role || 'student';
-            const key = `${videoId}:${canvasId}:${role}`;
-            if (poseOverlaySessions[key]?.stop) {
-                poseOverlaySessions[key].stop();
-            }
-
-            if (typeof Pose === 'undefined' || typeof drawConnectors === 'undefined') {
-                console.warn('MediaPipe pose scripts not loaded; skipping overlay.');
-                return;
-            }
-
-            syncOverlayCanvas(videoEl, canvasEl);
-            const ctx = canvasEl.getContext('2d');
-            const pose = new Pose({
-                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
-            });
-
-            pose.setOptions({
-                modelComplexity: 0,
-                smoothLandmarks: true,
-                enableSegmentation: false,
-                minDetectionConfidence: 0.5,
-                minTrackingConfidence: 0.5
-            });
-
-            pose.onResults((results) => {
-                syncOverlayCanvas(videoEl, canvasEl);
-                ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
-                if (!results || !results.poseLandmarks) return;
-                if (role === 'teacher' && !showTeacherOverlay) return;
-
-                const lineColor = role === 'teacher' ? '#60a5fa' : '#22c55e';
-                const pointColor = role === 'teacher' ? '#2563eb' : '#f97316';
-                const lineWidth = role === 'teacher' ? 2 : 3;
-                const radius = role === 'teacher' ? 2 : 3;
-
-                ctx.save();
-                drawConnectors(ctx, results.poseLandmarks, POSE_CONNECTIONS, {
-                    color: lineColor,
-                    lineWidth
-                });
-                drawLandmarks(ctx, results.poseLandmarks, {
-                    color: pointColor,
-                    radius
-                });
-                drawPivotMarkers(ctx, results.poseLandmarks, role, canvasEl.width, canvasEl.height);
-                ctx.restore();
-            });
-
-            let rafId = null;
-            let running = false;
-            let busy = false;
-            let lastTs = 0;
-
-            const loop = async (ts) => {
-                if (!running) return;
-                if (videoEl.paused || videoEl.ended || videoEl.readyState < 2) {
-                    rafId = requestAnimationFrame(loop);
-                    return;
-                }
-
-                if (busy || ts - lastTs < 66) {
-                    rafId = requestAnimationFrame(loop);
-                    return;
-                }
-
-                busy = true;
-                lastTs = ts;
-                try {
-                    await pose.send({ image: videoEl });
-                } catch (e) {
-                    console.warn('Pose overlay frame error:', e);
-                }
-                busy = false;
-                rafId = requestAnimationFrame(loop);
-            };
-
-            const start = () => {
-                if (running) return;
-                running = true;
-                rafId = requestAnimationFrame(loop);
-            };
-
-            const pause = () => {
-                running = false;
-                if (rafId !== null) cancelAnimationFrame(rafId);
-                rafId = null;
-            };
-
-            const handleResize = () => syncOverlayCanvas(videoEl, canvasEl);
-
-            videoEl.addEventListener('play', start);
-            videoEl.addEventListener('pause', pause);
-            videoEl.addEventListener('ended', pause);
-            videoEl.addEventListener('loadedmetadata', handleResize);
-            window.addEventListener('resize', handleResize);
-
-            if (!videoEl.paused && !videoEl.ended) start();
-
-            poseOverlaySessions[key] = {
-                stop: () => {
-                    pause();
-                    videoEl.removeEventListener('play', start);
-                    videoEl.removeEventListener('pause', pause);
-                    videoEl.removeEventListener('ended', pause);
-                    videoEl.removeEventListener('loadedmetadata', handleResize);
-                    window.removeEventListener('resize', handleResize);
-                    const c = canvasEl.getContext('2d');
-                    c.clearRect(0, 0, canvasEl.width, canvasEl.height);
-                }
-            };
-        }
-
-        function setupVideoSync(studentVideoId, teacherVideoId, studentTrim = 0, teacherTrim = 0) {
-            const studentVideo = document.getElementById(studentVideoId);
-            const teacherVideo = document.getElementById(teacherVideoId);
-            if (!studentVideo || !teacherVideo) return;
-
-            const key = `${studentVideoId}:${teacherVideoId}`;
-            if (syncPairSessions[key]?.stop) {
-                syncPairSessions[key].stop();
-            }
-
-            const delta = Number(teacherTrim || 0) - Number(studentTrim || 0);
-            let syncing = false;
-
-            const syncTeacherToStudent = () => {
-                if (syncing) return;
-                syncing = true;
-                const target = Math.max(0, (studentVideo.currentTime || 0) + delta);
-                const drift = (teacherVideo.currentTime || 0) - target;
-
-                if (Math.abs(drift) > 0.25) {
-                    teacherVideo.currentTime = target;
-                    teacherVideo.playbackRate = studentVideo.playbackRate || 1;
-                } else {
-                    const baseRate = studentVideo.playbackRate || 1;
-                    const correction = Math.max(-0.08, Math.min(0.08, -drift * 0.6));
-                    teacherVideo.playbackRate = Math.max(0.8, Math.min(1.25, baseRate + correction));
-                }
-
-                syncing = false;
-            };
-
-            const onPlay = () => {
-                syncTeacherToStudent();
-                teacherVideo.play().catch(() => {});
-            };
-            const onPause = () => teacherVideo.pause();
-            const onSeek = () => syncTeacherToStudent();
-            const onRate = () => syncTeacherToStudent();
-            const onTeacherMeta = () => syncTeacherToStudent();
-
-            let syncTimerId = null;
-            const startSyncTimer = () => {
-                if (syncTimerId !== null) return;
-                syncTimerId = window.setInterval(syncTeacherToStudent, 120);
-            };
-            const stopSyncTimer = () => {
-                if (syncTimerId !== null) {
-                    window.clearInterval(syncTimerId);
-                    syncTimerId = null;
-                }
-            };
-
-            studentVideo.addEventListener('play', onPlay);
-            studentVideo.addEventListener('pause', onPause);
-            studentVideo.addEventListener('seeking', onSeek);
-            studentVideo.addEventListener('seeked', onSeek);
-            studentVideo.addEventListener('ratechange', onRate);
-            teacherVideo.addEventListener('loadedmetadata', onTeacherMeta);
-
-            studentVideo.addEventListener('play', startSyncTimer);
-            studentVideo.addEventListener('pause', stopSyncTimer);
-            studentVideo.addEventListener('ended', stopSyncTimer);
-
-            syncTeacherToStudent();
-
-            syncPairSessions[key] = {
-                stop: () => {
-                    stopSyncTimer();
-                    studentVideo.removeEventListener('play', onPlay);
-                    studentVideo.removeEventListener('pause', onPause);
-                    studentVideo.removeEventListener('seeking', onSeek);
-                    studentVideo.removeEventListener('seeked', onSeek);
-                    studentVideo.removeEventListener('ratechange', onRate);
-                    teacherVideo.removeEventListener('loadedmetadata', onTeacherMeta);
-                    studentVideo.removeEventListener('play', startSyncTimer);
-                    studentVideo.removeEventListener('pause', stopSyncTimer);
-                    studentVideo.removeEventListener('ended', stopSyncTimer);
-                }
-            };
-        }
-
-        function setupEventListeners() {
-            document.getElementById('teacherBtn').addEventListener('click', () => document.getElementById('teacherFile').click());
-            document.getElementById('studentBtn').addEventListener('click', () => document.getElementById('studentFile').click());
-            document.getElementById('teacherFile').addEventListener('change', handleTeacherFileSelect);
-            document.getElementById('studentFile').addEventListener('change', handleStudentFileSelect);
-            document.getElementById('gradeAnotherBtn').addEventListener('click', resetStudentSection);
-            document.getElementById('clearHistoryBtn').addEventListener('click', async () => {
-                if (!confirm('Clear all grading history?')) return;
-                await fetch('/api/clear-history', { method: 'POST' });
-                window.historyItems = [];
-                document.getElementById('historyList').innerHTML = '<p class="empty-message">No grading history yet</p>';
-                loadStatus();
-            });
-            // Viewer play/pause controls — coordinated start
-            const playBtn = document.getElementById('viewerPlay');
-            const pauseBtn = document.getElementById('viewerPause');
-            if (playBtn) playBtn.addEventListener('click', syncPlay);
-            if (pauseBtn) pauseBtn.addEventListener('click', syncPause);
-            const homeToggleBtn = document.getElementById('teacherOverlayToggle');
-            const viewerToggleBtn = document.getElementById('viewerTeacherOverlayToggle');
-            if (homeToggleBtn) homeToggleBtn.addEventListener('click', toggleTeacherOverlay);
-            if (viewerToggleBtn) viewerToggleBtn.addEventListener('click', toggleTeacherOverlay);
-            updateTeacherOverlayButtons();
-            // Home comparison button – handled via delegated onclick in HTML (no element yet at setup)
-        }
-
-        async function handleTeacherFileSelect() {
-            const file = document.getElementById('teacherFile').files[0];
-            if (!file) return;
-            await uploadTeacher(file);
-        }
-
-        async function handleStudentFileSelect() {
-            const file = document.getElementById('studentFile').files[0];
-            if (!file) return;
-            await uploadStudent(file);
-        }
-
-        async function uploadTeacher(file) {
-            showLoading(true);
-            try {
-                const formData = new FormData();
-                formData.append('video', file);
-                const response = await fetch('/api/upload-teacher', { method: 'POST', body: formData });
-                const data = await response.json();
-                if (!response.ok) {
-                    alert('Error: ' + (data.error || 'Upload failed'));
-                    showLoading(false);
-                    return;
-                }
-                document.getElementById('teacherResult').style.display = 'block';
-                document.getElementById('teacherFrames').textContent = 'Frames extracted: ' + data.frames;
-                loadStatus();
-                enableStudentSection();
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
-            showLoading(false);
-        }
-
-        async function uploadStudent(file) {
-            const name = document.getElementById('studentName').value || 'Student';
-            const movementType = document.getElementById('movementType').value;
-            showLoading(true);
-            try {
-                const formData = new FormData();
-                formData.append('video', file);
-                formData.append('name', name);
-                formData.append('movement_type', movementType);
-                const response = await fetch('/api/upload-student', { method: 'POST', body: formData });
-                const data = await response.json();
-                if (!response.ok) {
-                    alert('Error: ' + (data.error || 'Upload failed'));
-                    showLoading(false);
-                    return;
-                }
-                displayResults(data);
-                loadStatus();
-                loadHistory();
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
-            showLoading(false);
-        }
-
-        function displayResults(data) {
-            document.getElementById('resultName').textContent = data.student_name;
-            document.getElementById('resultFrames').textContent = 'Frames: ' + data.frames;
-            document.getElementById('overallScore').textContent = data.overall_score;
-            document.getElementById('timingScore').textContent = data.timing_score;
-            document.getElementById('movementScore').textContent = data.movement_score;
-            document.getElementById('powerScore').textContent = data.power_score;
-            document.getElementById('armScore').textContent = data.arm_score;
-            document.getElementById('legScore').textContent = data.leg_score;
-            document.getElementById('torsoScore').textContent = data.torso_score ?? '--';
-            document.getElementById('feedbackText').textContent = data.feedback;
-            document.getElementById('starRating').textContent = '⭐'.repeat(data.star_rating);
-            // Detailed, time-stamped feedback
-            const detailEl = document.getElementById('detailedFeedback');
-            if (data.detailed_feedback && data.detailed_feedback.length > 0) {
-                // Store result and feedback globally for the viewer
-                window.currentResult = data;
-                window.currentFeedback = data.detailed_feedback;
-
-                const studentVideoUrl = data.student_video || data.composed_video || '';
-                const trimOffset = 0;
-                const teacherVideoUrl = data.teacher_video || '';
-                const teacherTrim = data.teacher_trim_sec || 0;
-                const studentTrim = data.student_trim_sec || 0;
-
-                let playerHtml;
-                const composedVideo = data.composed_video;
-                if (composedVideo) {
-                    playerHtml =
-                        `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">` +
-                            `<strong>Detailed suggestions:</strong>` +
-                            `<span style="font-size:0.8em;color:#94a3b8">Aligned Side-by-Side Video • click a dot to jump</span>` +
-                        `</div>` +
-                        `<div style="position:relative;width:100%">` +
-                            `<video id="composedMasterVideo" src="${composedVideo}" controls ` +
-                                `style="width:100%;border-radius:8px;background:#000;display:block" preload="metadata"></video>` +
-                        `</div>` +
-                        `<div style="display:flex;justify-content:flex-end;margin-top:8px;display:none;">` +
-                            `<button id="teacherOverlayToggle" class="btn btn-small" style="width:auto;margin-top:0">Hide Teacher Bones</button>` +
-                        `</div>` +
-                        `<div id="timelineBar" style="position:relative;height:28px;background:#f1f5f9;` +
-                            `border-radius:6px;margin-top:6px;overflow:visible"></div>` +
-                        `<div id="activeFeedback" style="margin-top:8px;min-height:2.2em;padding:6px 10px;` +
-                            `border-radius:6px;background:#f8fafc;color:#334155;font-size:0.9em">` +
-                            `<span style="color:#94a3b8">Select a marker above to see feedback at that moment.</span>` +
-                        `</div>`;
-                } else if (studentVideoUrl && teacherVideoUrl) {
-                    playerHtml =
-                        `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">` +
-                            `<strong>Detailed suggestions:</strong>` +
-                            `<span style="font-size:0.8em;color:#94a3b8">Blue=Teacher • Green/Orange=Student • click a dot to jump</span>` +
-                        `</div>` +
-                        `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">` +
-                            `<div style="position:relative;width:100%">` +
-                                `<video id="masterTeacherVideo" src="${teacherVideoUrl}" muted ` +
-                                    `style="width:100%;border-radius:8px;background:#000;display:block" preload="metadata"></video>` +
-                                `<canvas id="masterTeacherCanvas" ` +
-                                    `style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>` +
-                                `<div style="position:absolute;left:8px;bottom:8px;background:rgba(15,23,42,0.65);color:#fff;padding:2px 8px;border-radius:999px;font-size:12px">Teacher</div>` +
-                            `</div>` +
-                            `<div style="position:relative;width:100%">` +
-                                `<video id="masterStudentVideo" src="${studentVideoUrl}" controls ` +
-                                    `style="width:100%;border-radius:8px;background:#000;display:block" preload="metadata"></video>` +
-                                `<canvas id="masterStudentCanvas" ` +
-                                    `style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>` +
-                                `<div style="position:absolute;left:8px;bottom:8px;background:rgba(15,23,42,0.65);color:#fff;padding:2px 8px;border-radius:999px;font-size:12px">Student</div>` +
-                            `</div>` +
-                        `</div>` +
-                        `<div style="display:flex;justify-content:flex-end;margin-top:8px">` +
-                            `<button id="teacherOverlayToggle" class="btn btn-small" style="width:auto;margin-top:0">Hide Teacher Bones</button>` +
-                        `</div>` +
-                        `<div id="timelineBar" style="position:relative;height:28px;background:#f1f5f9;` +
-                            `border-radius:6px;margin-top:6px;overflow:visible"></div>` +
-                        `<div id="activeFeedback" style="margin-top:8px;min-height:2.2em;padding:6px 10px;` +
-                            `border-radius:6px;background:#f8fafc;color:#334155;font-size:0.9em">` +
-                            `<span style="color:#94a3b8">Select a marker above to see feedback at that moment.</span>` +
-                        `</div>`;
-                } else {
-                    // Fallback: thumbnail grid when no composed video is available
-                    const fallbackItems = data.detailed_feedback.map((d, i) => {
-                        const img = d.thumbnail
-                            ? `<img src="${d.thumbnail}" style="width:100%;height:auto;border-radius:8px;display:block">`
-                            : `<div style="height:140px;background:#f1f5f9;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#64748b">No image</div>`;
-                        const time = typeof d.start_time === 'number'
-                            ? `<span style="color:#94a3b8;font-size:0.8em">${d.start_time.toFixed(1)}s</span> ` : '';
-                        return `<div onclick="openViewer(${i})" style="cursor:pointer;width:220px;margin:8px;padding:8px;border-radius:10px;border:1px solid #e6eef8;background:#fff">` +
-                            `<div style="height:140px;overflow:hidden;border-radius:6px">${img}</div>` +
-                            `<div style="margin-top:6px;font-size:0.85em;color:#334155;line-height:1.3">${time}${d.semantic || d.message || ''}</div>` +
-                            `</div>`;
-                    }).join('');
-                    playerHtml = `<div style="margin-bottom:8px"><strong>Detailed suggestions:</strong></div><div style="display:flex;gap:12px;flex-wrap:wrap">${fallbackItems}</div>`;
-                }
-
-                detailEl.innerHTML = playerHtml;
-
-                if (data.composed_video) {
-                    setTimeout(() => {
-                        const composedVid = document.getElementById('composedMasterVideo');
-                        if (composedVid) {
-                            drawTimelineMarkers(data.detailed_feedback, composedVid, trimOffset);
-                        }
-                    }, 50);
-                } else if (studentVideoUrl && teacherVideoUrl) {
-                    setTimeout(() => {
-                        const homeToggleBtn = document.getElementById('teacherOverlayToggle');
-                        if (homeToggleBtn) {
-                            homeToggleBtn.addEventListener('click', toggleTeacherOverlay);
-                        }
-                        updateTeacherOverlayButtons();
-
-                        const studentVideo = document.getElementById('masterStudentVideo');
-                        if (studentVideo) {
-                            drawTimelineMarkers(data.detailed_feedback, studentVideo, trimOffset);
-                        }
-
-                        setupVideoSync('masterStudentVideo', 'masterTeacherVideo', studentTrim, teacherTrim);
-                        startPoseOverlay('masterTeacherVideo', 'masterTeacherCanvas', { role: 'teacher' });
-                        startPoseOverlay('masterStudentVideo', 'masterStudentCanvas', { role: 'student' });
-                    }, 50);
-                }
-            } else {
-                detailEl.innerHTML = '';
-            }
-            const date = new Date(data.timestamp);
-            document.getElementById('resultTime').textContent = 'Graded on ' + date.toLocaleString();
-            
-            setTimeout(() => {
-                document.getElementById('overallFill').style.width = data.overall_score + '%';
-                document.getElementById('timingFill').style.width = data.timing_score + '%';
-                document.getElementById('movementFill').style.width = data.movement_score + '%';
-                document.getElementById('powerFill').style.width = data.power_score + '%';
-                
-                document.getElementById('armFill').style.width = data.arm_score + '%';
-                document.getElementById('legFill').style.width = data.leg_score + '%';
-                if (data.torso_score != null) document.getElementById('torsoFill').style.width = data.torso_score + '%';
-            }, 100);
-            
-            document.getElementById('resultsSection').classList.add('show');
-            document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth' });
-        }
-
-        async function loadStatus() {
-            try {
-                const response = await fetch('/api/status');
-                const status = await response.json();
-                const teacherStatus = document.getElementById('teacherStatus');
-                if (status.teacher_exists) {
-                    teacherStatus.innerHTML = '<span class="status-indicator ready"></span>Teacher Reference: ' + status.teacher_frames + ' frames';
-                    enableStudentSection();
-                } else {
-                    teacherStatus.innerHTML = '<span class="status-indicator"></span>Teacher Reference: Not Set';
-                }
-                const studentStatus = document.getElementById('studentStatus');
-                studentStatus.innerHTML = '<span class="status-indicator' + (status.students_graded > 0 ? ' ready' : '') + '"></span>Students Graded: ' + status.students_graded;
-            } catch (error) {
-                console.error('Error loading status:', error);
-            }
-        }
-
-        async function loadHistory() {
-            try {
-                const response = await fetch('/api/history');
-                const history = await response.json();
-                const historyList = document.getElementById('historyList');
-                if (history.length === 0) {
-                    historyList.innerHTML = '<p class="empty-message">No grading history yet</p>';
-                    return;
-                }
-                history.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-                // store history globally so user can open a past result in viewer
-                window.historyItems = history;
-                historyList.innerHTML = history.map((item, idx) => {
-                    const date = new Date(item.timestamp);
-                    const timeStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute:'2-digit' });
-                    const scoreColor = item.overall_score >= 80 ? '#10b981' : item.overall_score >= 70 ? '#3b82f6' : item.overall_score >= 60 ? '#f59e0b' : '#ef4444';
-
-                    // Render up to 4 thumbnails for history preview
-                    let thumbs = '';
-                    if (item.detailed_feedback && item.detailed_feedback.length > 0) {
-                        const preview = item.detailed_feedback.slice(0,4).map(d => d.thumbnail ? `<img src="${d.thumbnail}" style="width:72px;height:48px;object-fit:cover;border-radius:6px;margin-right:6px"/>` : '') .join('');
-                        thumbs = `<div style="margin-top:8px">${preview}</div>`;
-                    }
-
-                    const torsoStr = item.torso_score != null ? ` • Torso: ${item.torso_score}` : '';
-                    return `<div class="history-item" onclick="openHistoryViewer(${idx})" style="border-left-color:${scoreColor};cursor:pointer"><div class="history-item-info"><div class="history-item-name">${item.student_name}</div><div class="history-item-details">${item.frames} frames • Timing: ${item.timing_score} • Move: ${item.movement_score} • Power: ${item.power_score}${thumbs}</div></div><div class="history-item-score"><div class="score" style="color:${scoreColor}">${item.overall_score}</div><div style="font-size:0.8em;color:#64748b">${timeStr}</div></div></div>`;
-                }).join('');
-            } catch (error) {
-                console.error('Error loading history:', error);
-            }
-        }
-
-        function enableStudentSection() {
-            document.getElementById('studentBtn').disabled = false;
-            document.getElementById('teacherWarning').style.display = 'none';
-        }
-
-        function resetStudentSection() {
-            document.getElementById('studentFile').value = '';
-            document.getElementById('studentName').value = '';
-            document.getElementById('resultsSection').classList.remove('show');
-            document.getElementById('studentUpload').scrollIntoView({ behavior: 'smooth' });
-        }
-
-        function showLoading(show) {
-            document.getElementById('loadingSpinner').classList.toggle('hidden', !show);
-        }
-
-        console.log('✓ Dance Grading System loaded');
-
-        // Viewer logic
-        document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeViewer(); });
-
-        // Full composed clip (no feedback index)
-        function openFullComparison(composedUrl) {
-            if (!composedUrl) { alert('Composed comparison video not available yet.'); return; }
-            const v = document.getElementById('compStudentVideo');
-            v.src = composedUrl;
-            v.currentTime = 0;
-            document.getElementById('viewerCaption').textContent = 'Full comparison — Teacher (left) vs Student (right)';
-            document.getElementById('viewerSubcaption').textContent = 'Pre-rendered side-by-side — both dancers always in sync.';
-            document.getElementById('viewerThumbs').innerHTML = '';
-            _openModal();
-        }
-
-        function openViewer(index) {
-            if (!window.currentFeedback || index < 0 || index >= window.currentFeedback.length) return;
-            window.viewerIndex = index;
-            const item = window.currentFeedback[index];
-
-            document.getElementById('viewerCaption').textContent = item.semantic || item.message || '';
-            document.getElementById('viewerSubcaption').textContent = item.message || '';
-
-            const studentV = document.getElementById('compStudentVideo');
-            const teacherV = document.getElementById('compTeacherVideo');
-            const studentUrl = (window.currentResult && (window.currentResult.student_video || window.currentResult.composed_video)) || '';
-            const teacherUrl = (window.currentResult && window.currentResult.teacher_video) || '';
-            const studentJumpTime = Math.max(0, Number(item.start_time || 0));
-            const teacherJumpTime = Math.max(0, Number(item.teacher_time || 0));
-
-            if (studentV && studentUrl) {
-                const studentChanged = studentV.src !== new URL(studentUrl, window.location.href).href;
-                studentV.src = studentUrl;
-                if (studentChanged) {
-                    studentV.addEventListener('loadedmetadata', () => {
-                        studentV.currentTime = studentJumpTime;
-                    }, { once: true });
-                } else {
-                    studentV.currentTime = studentJumpTime;
-                }
-            } else if (studentV) {
-                studentV.removeAttribute('src'); studentV.load();
-            }
-
-            if (teacherV && teacherUrl) {
-                const teacherChanged = teacherV.src !== new URL(teacherUrl, window.location.href).href;
-                teacherV.src = teacherUrl;
-                if (teacherChanged) {
-                    teacherV.addEventListener('loadedmetadata', () => {
-                        teacherV.currentTime = teacherJumpTime;
-                    }, { once: true });
-                } else {
-                    teacherV.currentTime = teacherJumpTime;
-                }
-            } else if (teacherV) {
-                teacherV.removeAttribute('src'); teacherV.load();
-            }
-
-            setupVideoSync(
-                'compStudentVideo',
-                'compTeacherVideo',
-                Number((window.currentResult && window.currentResult.student_trim_sec) || 0),
-                Number((window.currentResult && window.currentResult.teacher_trim_sec) || 0)
-            );
-            startPoseOverlay('compTeacherVideo', 'compTeacherCanvas', { role: 'teacher' });
-            startPoseOverlay('compStudentVideo', 'compStudentCanvas', { role: 'student' });
-
-            const thumbs = document.getElementById('viewerThumbs');
-            thumbs.innerHTML = (window.currentFeedback || []).map((d, i) =>
-                `<img src="${d.thumbnail||''}" onclick="openViewer(${i})" style="width:140px;height:90px;object-fit:cover;border-radius:6px;cursor:pointer;border:3px solid ${i===index?'#667eea':'transparent'};">`
-            ).join('');
-
-            _openModal();
-        }
-
-        function _openModal() {
-            document.getElementById('viewerModal').classList.remove('hidden');
-            const closeBtn = document.getElementById('viewerClose');
-            const prevBtn  = document.getElementById('viewerPrev');
-            const nextBtn  = document.getElementById('viewerNext');
-            const modalEl  = document.getElementById('viewerModal');
-            if (closeBtn) closeBtn.onclick = () => closeViewer();
-            if (prevBtn)  prevBtn.onclick  = () => showViewerIndex((window.viewerIndex||0) - 1);
-            if (nextBtn)  nextBtn.onclick  = () => showViewerIndex((window.viewerIndex||0) + 1);
-            if (modalEl)  modalEl.onclick  = (e) => { if (e.target === modalEl) closeViewer(); };
-        }
-
-        function showViewerIndex(i) {
-            if (!window.currentFeedback) return;
-            i = Math.max(0, Math.min(i, window.currentFeedback.length - 1));
-            openViewer(i);
-        }
-
-        function closeViewer() {
-            const sv = document.getElementById('compStudentVideo');
-            const tv = document.getElementById('compTeacherVideo');
-            if (sv) sv.pause();
-            if (tv) tv.pause();
-            document.getElementById('viewerModal').classList.add('hidden');
-        }
-
-        function openHistoryViewer(idx) {
-            if (!window.historyItems || !window.historyItems[idx]) return;
-            const item = window.historyItems[idx];
-            window.currentFeedback = item.detailed_feedback || [];
-            window.currentResult = item;
-            if (window.currentFeedback.length === 0) { alert('No detailed feedback for this entry.'); return; }
-            openViewer(0);
-        }
-
-        // ── Timeline marker logic ────────────────────────────────────────────
-        function drawTimelineMarkers(feedbackList, videoEl, trimOffset) {
-            const bar = document.getElementById('timelineBar');
-            if (!bar || !feedbackList || !feedbackList.length) return;
-
-            function placeMarkers() {
-                const dur = videoEl.duration;
-                if (!dur || isNaN(dur)) return;
-                bar.innerHTML = '';
-                feedbackList.forEach((item, i) => {
-                    const t = Math.max(0, (item.start_time || 0) - (trimOffset || 0));
-                    if (t > dur) return;
-                    const pct     = (t / dur) * 100;
-                    const diff    = (item.avg_diff || 0);
-                    if (diff <= 35) return;   // green zone — ignore entirely
-                    const isMajor = diff > 50;
-                    const color   = isMajor ? '#ef4444' : '#f59e0b';
-                    const dot = document.createElement('div');
-                    dot.style.cssText =
-                        `position:absolute;left:${pct.toFixed(2)}%;top:50%;` +
-                        `transform:translate(-50%,-50%);width:14px;height:14px;border-radius:50%;` +
-                        `background:${color};cursor:pointer;border:2px solid #fff;` +
-                        `box-shadow:0 1px 4px rgba(0,0,0,0.35);z-index:10;transition:transform 0.15s`;
-                    dot.title = (item.semantic || item.message || '').slice(0, 80);
-                    dot.onclick = (e) => {
-                        e.stopPropagation();
-                        videoEl.currentTime = t;
-                        const viewLink = ` <a href="#" onclick="openViewer(${i});return false;" ` +
-                            `style="color:#667eea;margin-left:10px;text-decoration:none">Open viewer →</a>`;
-                        document.getElementById('activeFeedback').innerHTML =
-                            `<span style="color:${color};font-weight:600">${(item.start_time||0).toFixed(1)}s</span>` +
-                            ` — ${item.semantic || item.message || ''}${viewLink}`;
-                        // Highlight selected dot
-                        bar.querySelectorAll('div').forEach(d => d.style.transform = 'translate(-50%,-50%)');
-                        dot.style.transform = 'translate(-50%,-50%) scale(1.55)';
-                    };
-                    bar.appendChild(dot);
-                });
-            }
-
-            if (videoEl.readyState >= 1 && videoEl.duration && !isNaN(videoEl.duration)) {
-                placeMarkers();
-            } else {
-                videoEl.addEventListener('loadedmetadata', placeMarkers, { once: true });
-            }
-        }
-
-        // Modal controls affect both videos (teacher + student)
-        function syncPlay()  {
-            const sv = document.getElementById('compStudentVideo');
-            const tv = document.getElementById('compTeacherVideo');
-            if (sv) sv.play().catch(()=>{});
-            if (tv) tv.play().catch(()=>{});
-        }
-        function syncPause() {
-            const sv = document.getElementById('compStudentVideo');
-            const tv = document.getElementById('compTeacherVideo');
-            if (sv) sv.pause();
-            if (tv) tv.pause();
-        }
-        function attachSyncHandlers() {}
-        function detachSyncHandlers() {}
-
-        // =============================================================
-        // Overlay mode: keep original video untouched and draw pose on top
-        // in a separate canvas process on the browser side.
-        // =============================================================
-    </script>
-
-    <!-- Fullscreen viewer modal for comparisons -->
-    <div id="viewerModal" class="modal hidden">
-        <div id="viewerBox" style="position:relative;max-width:90%;max-height:90%;background:#fff;border-radius:8px;padding:12px;">
-            <button id="viewerClose" aria-label="Close viewer" style="position:absolute;right:8px;top:8px;background:#f3f4f6;border:none;padding:6px 10px;border-radius:6px;cursor:pointer;z-index:2100">Close</button>
-            <button id="viewerPrev" style="position:absolute;left:-44px;top:50%;transform:translateY(-50%);background:transparent;border:none;color:white;font-size:32px;cursor:pointer">◀</button>
-            <button id="viewerNext" style="position:absolute;right:-44px;top:50%;transform:translateY(-50%);background:transparent;border:none;color:white;font-size:32px;cursor:pointer">▶</button>
-            <div id="viewerContent" style="max-width:100%;overflow:hidden;display:flex;align-items:center;justify-content:center">
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;width:100%">
-                    <div style="position:relative;width:100%">
-                        <video id="compTeacherVideo" muted style="width:100%;max-height:68vh;border-radius:6px;background:#000;display:block" preload="auto"></video>
-                        <canvas id="compTeacherCanvas" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
-                        <div style="position:absolute;left:8px;bottom:8px;background:rgba(15,23,42,0.65);color:#fff;padding:2px 8px;border-radius:999px;font-size:12px">Teacher</div>
-                    </div>
-                    <div style="position:relative;width:100%">
-                        <video id="compStudentVideo" controls style="width:100%;max-height:68vh;border-radius:6px;background:#000;display:block" preload="auto"></video>
-                        <canvas id="compStudentCanvas" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
-                        <div style="position:absolute;left:8px;bottom:8px;background:rgba(15,23,42,0.65);color:#fff;padding:2px 8px;border-radius:999px;font-size:12px">Student</div>
-                    </div>
-                </div>
-            </div>
-            <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
-                <button id="viewerPlay" class="btn btn-small">Play</button>
-                <button id="viewerPause" class="btn btn-small">Pause</button>
-                <button id="viewerTeacherOverlayToggle" class="btn btn-small" style="width:auto;margin-top:0">Hide Teacher Bones</button>
-                <div style="color:#64748b;margin-left:8px">Click a thumbnail to jump both videos to the comparison timestamp.</div>
-            </div>
-            <div id="viewerCaption" style="margin-top:8px;color:#334155;font-weight:600"></div>
-            <div id="viewerSubcaption" style="margin-top:6px;color:#475569;font-size:0.95em"></div>
-            <div id="viewerThumbs" style="margin-top:10px;display:flex;gap:8px;overflow-x:auto;padding-top:8px;border-top:1px solid #eef2ff"></div>
+        <div class="move-banner-cue" id="moveContextCue"></div>
+        <div class="move-banner-weights" id="moveContextWeights"></div>
+      </div>
+
+      <!-- Result header -->
+      <div class="result-header">
+        <div>
+          <div class="result-name" id="resultName">—</div>
+          <div class="result-meta" id="resultFrames"></div>
         </div>
+        <div class="result-time" id="resultTime"></div>
+      </div>
+
+      <!-- Scores -->
+      <div class="scores-row">
+        <div class="score-card overall">
+          <div class="sc-label">
+            Overall Score
+            <span class="sc-weight" id="overallWeightLabel"></span>
+          </div>
+          <div class="sc-value" id="overallScore">—</div>
+          <div class="sc-bar"><div class="sc-fill" id="overallFill"></div></div>
+        </div>
+        <div class="score-card" style="border-top:2px solid var(--teal)">
+          <div class="sc-label">Wirama · Timing</div>
+          <div class="sc-value" id="timingScore">—</div>
+          <div class="sc-bar"><div class="sc-fill" id="timingFill" style="background:var(--teal)"></div></div>
+        </div>
+        <div class="score-card" style="border-top:2px solid var(--accent)">
+          <div class="sc-label">Wiraga · Movement</div>
+          <div class="sc-value" id="movementScore">—</div>
+          <div class="sc-bar"><div class="sc-fill" id="movementFill" style="background:var(--accent)"></div></div>
+        </div>
+      </div>
+
+      <!-- Regional -->
+      <div class="regional-row">
+        <div class="regional-card score-card" id="armCard">
+          <div class="sc-label">Arms</div>
+          <div class="sc-value" id="armScore">—</div>
+          <div class="sc-bar"><div class="sc-fill" id="armFill"></div></div>
+        </div>
+        <div class="regional-card score-card" id="legCard">
+          <div class="sc-label">Legs</div>
+          <div class="sc-value" id="legScore">—</div>
+          <div class="sc-bar"><div class="sc-fill" id="legFill"></div></div>
+        </div>
+        <div class="regional-card score-card" id="torsoCard">
+          <div class="sc-label">Torso</div>
+          <div class="sc-value" id="torsoScore">—</div>
+          <div class="sc-bar"><div class="sc-fill" id="torsoFill"></div></div>
+        </div>
+      </div>
+
+      <!-- Feedback summary -->
+      <div class="feedback-card">
+        <h4>Feedback</h4>
+        <div class="star-display" id="starRating"></div>
+        <div class="feedback-text" id="feedbackText"></div>
+        <div class="detailed-feedback-area" id="detailedFeedback"></div>
+      </div>
+
+      <!-- Generalized feedback -->
+      <div class="generalized-feedback-section" id="generalizedFeedbackSection" style="display:none">
+        <h3 class="section-title">What to improve</h3>
+        <div id="generalizedFeedbackList" class="feedback-list"></div>
+      </div>
+
+      <button class="btn-grade-another" id="gradeAnotherBtn">Grade Another Student</button>
+    </section>
+
+    <!-- C: History -->
+    <div class="section-label">History</div>
+    <div class="history-card">
+      <div class="history-header">
+        <div class="history-title">Grading History</div>
+        <button class="btn-clear" id="clearHistoryBtn">Clear All</button>
+      </div>
+      <div id="historyList"><div class="empty-msg">No grading history yet</div></div>
     </div>
+
+  </div><!-- /s2-content -->
+</div><!-- /screen2 -->
+
+<!-- ═══════════════════════════════════ LOADING OVERLAY ═══════ -->
+<div id="loadingSpinner" class="hidden">
+  <div class="loading-inner">
+    <div class="loading-ring"></div>
+    <div class="loading-title" id="loadingTitle">Processing…</div>
+    <div class="loading-stages" id="loadingStages"></div>
+    <div class="loading-hint">This may take 1–3 min depending on video length</div>
+  </div>
+</div>
+
+
+<!-- Toast container -->
+<div id="toastContainer"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+<script>
+/* ────────────────────────────────────────────────────────────
+   MOVEMENT DATA
+──────────────────────────────────────────────────────────── */
+const MOVEMENTS = {
+  bouncing: {
+    display: 'Bouncing',
+    group: 'Basic Movements',
+    joints: ['Knees'],
+    ignored: ['Arms', 'Wrists', 'Ankles'],
+    weights: { wiraga: 50, wirama: 50, power: 0 },
+    desc: 'Rhythmic vertical knee bounce on every beat. Knees absorb and rebound; hips follow naturally.'
+  },
+  stepping: {
+    display: 'Stepping',
+    group: 'Basic Movements',
+    joints: ['Ankles'],
+    ignored: ['Arms', 'Spine'],
+    weights: { wiraga: 50, wirama: 50, power: 0 },
+    desc: 'Sharp foot-led steps with precise ankle placement and timing.'
+  },
+  sliding: {
+    display: 'Sliding',
+    group: 'Basic Movements',
+    joints: ['Hips', 'Ankles', 'Spine (balance)'],
+    ignored: ['Arms', 'Knees'],
+    weights: { wiraga: 50, wirama: 50, power: 0 },
+    desc: 'Smooth horizontal travel — balance and body synchronisation are key.'
+  },
+};
+
+const GROUPS = {
+  basic: ['bouncing', 'stepping', 'sliding'],
+};
+
+/* ────────────────────────────────────────────────────────────
+   GLOBAL STATE
+──────────────────────────────────────────────────────────── */
+let selectedMovement = null;
+const poseOverlaySessions = {};
+const syncPairSessions   = {};
+let showTeacherOverlay = true;
+let showStudentOverlay = true;
+
+/* ────────────────────────────────────────────────────────────
+   SCREEN MANAGEMENT
+──────────────────────────────────────────────────────────── */
+function showScreen(n) {
+  sessionStorage.setItem('dgs_screen', n);
+  const s1 = document.getElementById('screen1');
+  const s2 = document.getElementById('screen2');
+  if (n === 2) {
+    s1.style.opacity = '0';
+    setTimeout(() => {
+      s1.classList.add('screen-hidden');
+      s1.classList.remove('screen-active');
+      s2.classList.remove('screen-hidden');
+      s2.classList.add('screen-active');
+      s2.style.opacity = '0';
+      requestAnimationFrame(() => { s2.style.opacity = '1'; });
+      updateTopbar();
+      loadStatus();
+      loadHistory();
+      if (selectedMovement) loadReferenceVideo(selectedMovement);
+    }, 280);
+  } else {
+    sessionStorage.removeItem('dgs_screen');
+    s2.style.opacity = '0';
+    setTimeout(() => {
+      s2.classList.add('screen-hidden');
+      s2.classList.remove('screen-active');
+      s1.classList.remove('screen-hidden');
+      s1.classList.add('screen-active');
+      s1.style.opacity = '0';
+      requestAnimationFrame(() => { s1.style.opacity = '1'; });
+    }, 280);
+  }
+}
+
+function updateTopbar() {
+  if (!selectedMovement) return;
+  const mv = MOVEMENTS[selectedMovement];
+  document.getElementById('badgeName').textContent   = mv.display;
+  document.getElementById('badgeJoints').textContent = mv.joints.join(' · ');
+}
+
+/* ────────────────────────────────────────────────────────────
+   TOAST SYSTEM
+──────────────────────────────────────────────────────────── */
+function showToast(type, message) {
+  const c = document.getElementById('toastContainer');
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.innerHTML = `<span class="toast-msg">${message}</span>
+    <button class="toast-close" onclick="this.closest('.toast').remove()">✕</button>`;
+  c.appendChild(t);
+  setTimeout(() => { if (t.parentNode) t.remove(); }, 4200);
+}
+
+// Legacy compatibility
+function showModal(type, message) { showToast(type, message); }
+function closeModal() {}
+
+/* ────────────────────────────────────────────────────────────
+   MOVEMENT CARD BUILDER
+──────────────────────────────────────────────────────────── */
+function buildMovementCards() {
+  const container = document.getElementById('group-basic');
+  if (!container) return;
+
+  GROUPS.basic.forEach(key => {
+    const mv = MOVEMENTS[key];
+    if (!mv) return;
+    const card = document.createElement('div');
+    card.className = 'mv-card';
+    card.dataset.key = key;
+
+    card.innerHTML = `
+      <div class="mv-name">${mv.display}</div>
+      <div class="mv-joints">${mv.joints.map(j => `<span class="joint-chip">${j}</span>`).join('')}</div>
+      <div class="mv-weight-bar">
+        <div class="wb-wiraga" style="flex:${mv.weights.wiraga}" title="Wiraga ${mv.weights.wiraga}%"></div>
+        <div class="wb-wirama" style="flex:${mv.weights.wirama}" title="Wirama ${mv.weights.wirama}%"></div>
+      </div>
+      <div class="mv-desc">${mv.desc}</div>
+    `;
+    card.addEventListener('click', () => selectMovement(key, card));
+    container.appendChild(card);
+  });
+}
+
+function selectMovement(key, card) {
+  selectedMovement = key;
+  sessionStorage.setItem('dgs_movement', key);
+  document.querySelectorAll('.mv-card').forEach(c => c.classList.remove('selected'));
+  card.classList.add('selected');
+  const mv = MOVEMENTS[key];
+  const badge = document.getElementById('selectedBadge');
+  badge.textContent = mv.display;
+  badge.classList.add('visible');
+  document.getElementById('continueBtn').disabled = false;
+}
+
+/* ────────────────────────────────────────────────────────────
+   DROPZONE SETUP
+──────────────────────────────────────────────────────────── */
+function setupDropzone(dropzoneId, fileInputId, onFile) {
+  const dz = document.getElementById(dropzoneId);
+  const fi = document.getElementById(fileInputId);
+  if (!dz || !fi) return;
+  dz.addEventListener('click', () => fi.click());
+  fi.addEventListener('change', () => { if (fi.files[0]) onFile(fi.files[0]); });
+  dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('dragover'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault();
+    dz.classList.remove('dragover');
+    const file = e.dataTransfer.files[0];
+    if (file) onFile(file);
+  });
+}
+
+/* ────────────────────────────────────────────────────────────
+   SCORE UTILITIES
+──────────────────────────────────────────────────────────── */
+function getScoreClass(s) {
+  if (s >= 80) return 'score-green';
+  if (s >= 70) return 'score-blue';
+  if (s >= 60) return 'score-amber';
+  return 'score-red';
+}
+function getFillClass(s) {
+  if (s >= 80) return 'fill-green';
+  if (s >= 70) return 'fill-blue';
+  if (s >= 60) return 'fill-amber';
+  return 'fill-red';
+}
+
+function animateNumber(el, target, duration) {
+  if (!el) return;
+  const start = performance.now();
+  const run = (t) => {
+    const p = Math.min((t - start) / duration, 1);
+    const eased = 1 - Math.pow(1 - p, 3);
+    el.textContent = Math.round(eased * target);
+    if (p < 1) requestAnimationFrame(run);
+    else el.textContent = target;
+  };
+  requestAnimationFrame(run);
+}
+
+function animateScoreCard(scoreId, fillId, value) {
+  const scoreEl = document.getElementById(scoreId);
+  const fillEl  = document.getElementById(fillId);
+  if (scoreEl) {
+    animateNumber(scoreEl, value, 520);
+    scoreEl.className = 'sc-value ' + getScoreClass(value);
+  }
+  if (fillEl) {
+    fillEl.className = 'sc-fill ' + getFillClass(value);
+    fillEl.style.width = value + '%';
+  }
+}
+
+/* ────────────────────────────────────────────────────────────
+   LOADING OVERLAY
+──────────────────────────────────────────────────────────── */
+function showLoading(show, stages, title) {
+  const spinner = document.getElementById('loadingSpinner');
+  const stageEl = document.getElementById('loadingStages');
+  const titleEl = document.getElementById('loadingTitle');
+  spinner.classList.toggle('hidden', !show);
+  if (!show) return;
+  if (titleEl) titleEl.textContent = title || 'Processing…';
+  if (stageEl && stages) {
+    stageEl.innerHTML = stages.map((s, i) =>
+      `<div class="lstg" id="lstg_${i}"><span class="lstg-dot"></span>${s}</div>`
+    ).join('');
+    const first = document.getElementById('lstg_0');
+    if (first) first.classList.add('active');
+    let cur = 0;
+    const iv = setInterval(() => {
+      const prev = document.getElementById(`lstg_${cur}`);
+      if (prev) prev.classList.add('done');
+      cur++;
+      const next = document.getElementById(`lstg_${cur}`);
+      if (next) next.classList.add('active');
+      else clearInterval(iv);
+    }, 2200);
+  }
+}
+
+/* ────────────────────────────────────────────────────────────
+   STATUS & HISTORY
+──────────────────────────────────────────────────────────── */
+async function loadStatus() {
+  try {
+    const res  = await fetch('/api/status');
+    const data = await res.json();
+
+    // References chip
+    const refDot  = document.getElementById('refDot');
+    const refText = document.getElementById('refStatusText');
+    const avail   = (data.references_available || []).length;
+    refDot.classList.toggle('ready', avail === 3);
+    refText.textContent = `References: ${avail}/3`;
+
+    // Student attempts chip
+    const sDot  = document.getElementById('studentDot');
+    const sText = document.getElementById('studentStatusText');
+    sDot.classList.toggle('ready', data.student_attempts > 0);
+    sText.textContent = data.student_attempts + ' graded';
+  } catch(e) { console.error('loadStatus:', e); }
+}
+
+// Cache of references metadata fetched from /api/references
+window._refsMeta = null;
+
+async function loadReferenceVideo(movement) {
+  const videoEl    = document.getElementById('refVideo');
+  const nameEl     = document.getElementById('refCardMoveName');
+  const subEl      = document.getElementById('refCardSub');
+  const warnEl     = document.getElementById('refWarning');
+  const notAvailEl = document.getElementById('refNotAvailable');
+  if (!videoEl) return;
+
+  const LABELS = { bouncing: 'Bouncing', stepping: 'Stepping', sliding: 'Sliding' };
+  if (nameEl) nameEl.textContent = LABELS[movement] || movement;
+
+  try {
+    if (!window._refsMeta) {
+      const r = await fetch('/api/references');
+      window._refsMeta = await r.json();
+    }
+    const ref = window._refsMeta[movement];
+    if (ref && ref.video_url) {
+      videoEl.src = ref.video_url;
+      videoEl.style.display = 'block';
+      if (notAvailEl) notAvailEl.style.display = 'none';
+      if (subEl) subEl.textContent = `${ref.duration_sec.toFixed(1)}s · ${ref.frame_count} frames`;
+      if (warnEl) warnEl.style.display = 'none';
+      document.getElementById('studentBtn').disabled = false;
+    } else {
+      videoEl.src = '';
+      videoEl.style.display = 'none';
+      if (notAvailEl) notAvailEl.style.display = 'block';
+      if (subEl) subEl.textContent = 'No reference cached for this movement';
+      if (warnEl) {
+        warnEl.style.display = '';
+        const warnText = document.getElementById('refWarningText');
+        if (warnText) warnText.textContent = `Reference not available for "${movement}"`;
+      }
+      document.getElementById('studentBtn').disabled = true;
+    }
+  } catch(e) {
+    console.error('loadReferenceVideo:', e);
+    if (subEl) subEl.textContent = 'Could not load reference';
+  }
+}
+
+async function loadHistory() {
+  try {
+    const res     = await fetch('/api/history');
+    const history = await res.json();
+    const list    = document.getElementById('historyList');
+    if (!history.length) {
+      list.innerHTML = '<div class="empty-msg">No grading history yet</div>';
+      return;
+    }
+    window.historyItems = history;
+
+    const tbl = document.createElement('table');
+    tbl.className = 'history-table';
+    tbl.innerHTML = `<thead><tr>
+      <th>Name</th><th>Movement</th>
+      <th>Wirama</th><th>Wiraga</th>
+      <th>Overall</th><th>Date</th><th></th>
+    </tr></thead>`;
+    const tbody = document.createElement('tbody');
+
+    history.forEach((item, idx) => {
+      const d  = new Date(item.timestamp);
+      const ds = d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+      const sc = getScoreClass(item.overall_score);
+
+      // Main row
+      const tr = document.createElement('tr');
+      tr.className = 'history-row';
+      tr.innerHTML = `
+        <td style="font-weight:600">${item.student_name || '—'}</td>
+        <td><span class="mv-pill">${item.selected_movement || item.movement_type || '—'}</span></td>
+        <td>${item.timing_score}</td>
+        <td>${item.movement_score}</td>
+        <td><span class="score-pill ${sc}">${item.overall_score}</span></td>
+        <td style="color:var(--muted)">${ds}</td>
+        <td><button class="btn-history-expand" title="Show video &amp; feedback">▶</button></td>
+      `;
+
+      // Expandable detail row
+      const detailTr = document.createElement('tr');
+      detailTr.className = 'history-detail-row';
+      detailTr.style.display = 'none';
+      const detailTd = document.createElement('td');
+      detailTd.colSpan = 7;
+      detailTd.className = 'history-detail-cell';
+      detailTr.appendChild(detailTd);
+
+      let expanded = false;
+      let loopCleanup = null;
+
+      tr.querySelector('.btn-history-expand').addEventListener('click', e => {
+        e.stopPropagation();
+        expanded = !expanded;
+        if (expanded) {
+          detailTr.style.display = '';
+          buildHistoryDetail(detailTd, item);
+          tr.querySelector('.btn-history-expand').textContent = '▼';
+        } else {
+          if (loopCleanup) { loopCleanup(); loopCleanup = null; }
+          detailTd.innerHTML = '';
+          detailTr.style.display = 'none';
+          tr.querySelector('.btn-history-expand').textContent = '▶';
+        }
+      });
+
+      tbody.appendChild(tr);
+      tbody.appendChild(detailTr);
+    });
+
+    tbl.appendChild(tbody);
+    list.innerHTML = '';
+    list.appendChild(tbl);
+  } catch(e) { console.error('loadHistory:', e); }
+}
+
+function buildHistoryDetail(container, item) {
+  const hasVideo = !!item.composed_video;
+  const gfb      = item.generalized_feedback || [];
+
+  let html = `<div style="display:grid;grid-template-columns:${hasVideo ? '1fr 1fr' : '1fr'};gap:16px;padding:12px 4px">`;
+
+  if (hasVideo) {
+    html += `<div>
+      <div style="font-family:'Syne',sans-serif;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.07em;color:var(--muted);margin-bottom:6px">Comparison Video</div>
+      <video src="${item.composed_video}" controls
+        style="width:100%;border-radius:8px;background:#000;display:block" preload="metadata"></video>
+    </div>`;
+  }
+
+  html += `<div>
+    <div style="font-family:'Syne',sans-serif;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.07em;color:var(--muted);margin-bottom:8px">What to improve</div>
+    <div id="hgfb_${item.id}" class="feedback-list"></div>
+  </div></div>`;
+
+  container.innerHTML = html;
+
+  const fbEl = document.getElementById(`hgfb_${item.id}`);
+  if (!fbEl) return;
+
+  if (!gfb.length) {
+    fbEl.innerHTML = '<div class="feedback-empty" style="font-size:0.8rem">No issues recorded.</div>';
+    return;
+  }
+
+  gfb.forEach(fi => {
+    const severityClass =
+      fi.severity >= 70 ? 'severity-high' :
+      fi.severity >= 40 ? 'severity-med'  : 'severity-low';
+    const occCount = Array.isArray(fi.occurrences) ? fi.occurrences.length : 0;
+    const div = document.createElement('div');
+    div.className = `feedback-item ${severityClass}`;
+    div.innerHTML =
+      `<span class="feedback-badge ${fi.type}">${fi.type}</span>` +
+      `<div class="feedback-content">` +
+        `<div class="feedback-message" style="font-size:0.82rem">${fi.message}</div>` +
+        (occCount
+          ? `<span style="font-family:'DM Mono',monospace;font-size:0.7rem;color:var(--muted)">${occCount} occurrence${occCount > 1 ? 's' : ''}</span>`
+          : '') +
+      `</div>`;
+    fbEl.appendChild(div);
+  });
+}
+
+/* ────────────────────────────────────────────────────────────
+   UPLOAD HANDLERS
+──────────────────────────────────────────────────────────── */
+
+async function uploadStudent(file) {
+  const name         = document.getElementById('studentName').value.trim() || 'Student';
+  const movementType = selectedMovement || 'full_body';
+  showLoading(true,
+    ['Uploading video','Extracting pose keypoints',
+     'Aligning audio tracks','Computing Wiraga score',
+     'Computing Wirama score','Computing Power score',
+     'Generating feedback','Rendering comparison video'],
+    'Grading ' + name + '…');
+  try {
+    const _dotIdx  = file.name.lastIndexOf('.');
+    const safeExt  = (_dotIdx > 0 ? file.name.slice(_dotIdx + 1) : 'mp4').replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'mp4';
+    const safeTs   = Date.now();
+    let uploadFile = file;
+    try { uploadFile = new File([file], `upload_${safeTs}.${safeExt}`, { type: file.type || 'video/mp4' }); } catch(_) {}
+    const fd = new FormData();
+    fd.append('video', uploadFile, `upload_${safeTs}.${safeExt}`);
+    fd.append('name', name);
+    fd.append('movement_type', movementType);
+    fd.append('start_offset', window._studentStartOffset || 0);
+    const res  = await fetch('/api/upload-student', { method:'POST', body:fd });
+    const ct   = res.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) {
+      if (res.status === 401 || res.redirected) {
+        showToast('error', 'Session expired — please refresh the page and log in again.');
+      } else {
+        showToast('error', `Server error (${res.status}) — check the console for details.`);
+        console.error('Non-JSON response from /api/upload-student:', res.status, res.url);
+      }
+      showLoading(false);
+      return;
+    }
+    const data = await res.json();
+    if (!res.ok) {
+      showToast('error', data.error || 'Grading failed');
+      showLoading(false);
+      return;
+    }
+    displayResults(data);
+    loadStatus();
+    loadHistory();
+  } catch(e) { showToast('error', 'Upload error: ' + e.message); console.error('uploadStudent error:', e); }
+  showLoading(false);
+}
+
+/* ────────────────────────────────────────────────────────────
+   ENABLE / RESET STUDENT
+──────────────────────────────────────────────────────────── */
+
+function resetStudentSection() {
+  document.getElementById('studentFile').value = '';
+  document.getElementById('studentName').value = '';
+  document.getElementById('resultsSection').classList.remove('show');
+  document.getElementById('startMarkerPanel').classList.remove('visible');
+  const gfSection = document.getElementById('generalizedFeedbackSection');
+  if (gfSection) gfSection.style.display = 'none';
+  window.activeFeedbackIdx = null;
+  uploadStudent._pendingFile = null;
+  window._studentStartOffset = 0;
+  document.getElementById('studentUpload').scrollIntoView({ behavior:'smooth' });
+}
+
+/* ────────────────────────────────────────────────────────────
+   DISPLAY RESULTS
+──────────────────────────────────────────────────────────── */
+function displayResults(data) {
+  document.getElementById('resultName').textContent    = data.student_name;
+  document.getElementById('resultFrames').textContent  = 'Frames: ' + data.frames;
+  document.getElementById('feedbackText').textContent  = data.feedback;
+  document.getElementById('starRating').textContent    = '⭐'.repeat(data.star_rating);
+
+  const date = new Date(data.timestamp);
+  document.getElementById('resultTime').textContent = 'Graded ' + date.toLocaleString();
+
+  // Animated scores (after brief delay for CSS to settle)
+  setTimeout(() => {
+    animateScoreCard('overallScore',  'overallFill',  data.overall_score);
+    animateScoreCard('timingScore',   'timingFill',   data.timing_score);
+    animateScoreCard('movementScore', 'movementFill', data.movement_score);
+    animateScoreCard('armScore',      'armFill',      data.arm_score);
+    animateScoreCard('legScore',      'legFill',      data.leg_score);
+    if (data.torso_score != null) animateScoreCard('torsoScore', 'torsoFill', data.torso_score);
+  }, 120);
+
+  // Move context banner
+  const MOVE_LABELS = {
+    bouncing: 'Bouncing',
+    stepping: 'Stepping',
+    sliding:  'Sliding',
+    full_body:'Full Body'
+  };
+  const MOVE_JOINTS = {
+    bouncing: 'Knees',
+    stepping: 'Ankles',
+    sliding:  'Hips · Ankles · Spine',
+    full_body:'All joints'
+  };
+  const MOVE_CUES = {
+    bouncing: 'Knees absorb and rebound on every beat. Hips drive the bounce.',
+    stepping: 'Foot placement lands cleanly on the beat. No dragging.',
+    sliding:  'Smooth horizontal travel. Continuous without stiffness.',
+    full_body:'Move classifier adapts weights automatically per section.'
+  };
+
+  const sm = data.selected_movement || (data.detail && data.detail.movement_config && data.detail.movement_config.selected_movement) || 'full_body';
+  const banner = document.getElementById('moveContextBanner');
+  if (banner && sm) {
+    document.getElementById('moveContextName').textContent   = MOVE_LABELS[sm] || sm;
+    document.getElementById('moveContextJoints').textContent = MOVE_JOINTS[sm] || '';
+    document.getElementById('moveContextCue').textContent    = MOVE_CUES[sm] || '';
+    const detail = data.scoring_detail || data.detail || {};
+    const cfg    = (detail.movement_config && detail.movement_config.weights) || {};
+    if (cfg.wiraga !== undefined) {
+      document.getElementById('moveContextWeights').textContent =
+        `Wiraga ${Math.round(cfg.wiraga*100)}%  ·  Wirama ${Math.round(cfg.wirama*100)}%`;
+      document.getElementById('overallWeightLabel').textContent =
+        `(50% Wiraga + 50% Wirama)`;
+    }
+    banner.style.display = 'block';
+  }
+
+  // Video player (composed or side-by-side)
+  const detailEl = document.getElementById('detailedFeedback');
+  const studentVideoUrl = data.student_video || '';
+  const teacherVideoUrl = data.teacher_video || '';
+  const teacherTrim     = data.teacher_trim_sec || 0;
+  const studentTrim     = data.student_trim_sec || 0;
+
+  // Custom player HTML.
+  // withMarkers=true puts id="videoTimelineMarkers" inside the progress bar.
+  function _customPlayerHtml(videoId, src, withMarkers) {
+    return (
+      `<div class="custom-video-player">` +
+        `<video id="${videoId}" src="${src}" preload="metadata"></video>` +
+        `<div class="custom-controls">` +
+          `<button class="ctrl-btn" id="${videoId}PlayBtn">&#9654;</button>` +
+          `<span class="time-display" id="${videoId}TimeDisplay">0:00 / 0:00</span>` +
+          `<div class="progress-container" id="${videoId}Progress">` +
+            `<div class="progress-fill" id="${videoId}Fill"></div>` +
+            `<div class="progress-thumb" id="${videoId}Thumb"></div>` +
+            (withMarkers ? `<div class="markers-overlay" id="videoTimelineMarkers"></div>` : '') +
+          `</div>` +
+        `</div>` +
+      `</div>`
+    );
+  }
+
+  // Reusable side-by-side skeleton HTML (teacher left, student right with custom player + canvases)
+  function _sideBySideHtml(tUrl, sUrl) {
+    return (
+      `<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">` +
+        `<div style="position:relative">` +
+          `<video id="masterTeacherVideo" src="${tUrl}" muted ` +
+            `style="width:100%;border-radius:8px;background:#000;display:block" preload="metadata"></video>` +
+          `<canvas id="masterTeacherCanvas" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>` +
+          `<div style="position:absolute;left:8px;bottom:8px;background:rgba(10,10,12,0.75);color:var(--text);padding:2px 8px;border-radius:999px;font-size:11px;letter-spacing:0.05em">TEACHER</div>` +
+        `</div>` +
+        `<div style="position:relative">` +
+          _customPlayerHtml('masterStudentVideo', sUrl, true) +
+          `<canvas id="masterStudentCanvas" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:5"></canvas>` +
+          `<div style="position:absolute;left:8px;bottom:40px;background:rgba(10,10,12,0.75);color:var(--text);padding:2px 8px;border-radius:999px;font-size:11px;letter-spacing:0.05em;z-index:6">STUDENT</div>` +
+        `</div>` +
+      `</div>`
+    );
+  }
+
+  if (data.composed_video) {
+    const hasIndividuals = !!(studentVideoUrl && teacherVideoUrl);
+    detailEl.innerHTML =
+      `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">` +
+        `<strong style="font-family:'Syne',sans-serif;font-size:0.82rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted)">Comparison Video</strong>` +
+        (hasIndividuals
+          ? `<div style="display:flex;gap:8px;align-items:center">` +
+              `<div id="boneToggleGroup" style="display:none;gap:8px">` +
+                `<button id="teacherOverlayToggle" class="btn btn-small">Hide Teacher Bones</button>` +
+                `<button id="studentOverlayToggle" class="btn btn-small">Hide Student Bones</button>` +
+              `</div>` +
+              `<button id="skeletonViewToggle" class="btn btn-small">Show Skeleton</button>` +
+            `</div>`
+          : '') +
+      `</div>` +
+      `<div id="composedVideoSection">` +
+        _customPlayerHtml('composedMasterVideo', data.composed_video, false) +
+      `</div>` +
+      (hasIndividuals
+        ? `<div id="skeletonVideoSection" style="display:none">` +
+            _sideBySideHtml(teacherVideoUrl, studentVideoUrl) +
+          `</div>`
+        : '');
+
+    setTimeout(() => {
+      setupCustomPlayer('composedMasterVideo');
+      if (!hasIndividuals) return;
+
+      let _skeletonInitialized = false;
+      let _skeletonActive      = false;
+
+      const skeletonBtn    = document.getElementById('skeletonViewToggle');
+      const composedSec    = document.getElementById('composedVideoSection');
+      const skeletonSec    = document.getElementById('skeletonVideoSection');
+      const boneGroup      = document.getElementById('boneToggleGroup');
+
+      // Wire bone-toggle buttons (elements exist in DOM even while hidden)
+      const tBtn = document.getElementById('teacherOverlayToggle');
+      const sBtn = document.getElementById('studentOverlayToggle');
+      if (tBtn) tBtn.addEventListener('click', toggleTeacherOverlay);
+      if (sBtn) sBtn.addEventListener('click', toggleStudentOverlay);
+      updateTeacherOverlayButtons();
+      updateStudentOverlayButtons();
+
+      skeletonBtn && skeletonBtn.addEventListener('click', () => {
+        _skeletonActive = !_skeletonActive;
+
+        if (_skeletonActive) {
+          // Transfer playback position from composed → student
+          const cv = document.getElementById('composedMasterVideo');
+          const seekTo = cv ? cv.currentTime : 0;
+          cv && cv.pause();
+
+          composedSec.style.display = 'none';
+          skeletonSec.style.display = 'block';
+          boneGroup.style.display   = 'flex';
+          skeletonBtn.textContent   = 'Hide Skeleton';
+
+          // Lazy-init MediaPipe + sync on first activation
+          if (!_skeletonInitialized) {
+            _skeletonInitialized = true;
+            setupCustomPlayer('masterStudentVideo');
+            setupVideoSync('masterStudentVideo', 'masterTeacherVideo', studentTrim, teacherTrim);
+            startPoseOverlay('masterTeacherVideo', 'masterTeacherCanvas', { role:'teacher' });
+            startPoseOverlay('masterStudentVideo', 'masterStudentCanvas', { role:'student' });
+          }
+
+          // Seek student to matching position (student video includes trim offset)
+          const sv = document.getElementById('masterStudentVideo');
+          if (sv) sv.currentTime = Math.max(0, studentTrim + seekTo);
+
+        } else {
+          // Transfer playback position from student → composed
+          const sv = document.getElementById('masterStudentVideo');
+          const seekTo = sv ? Math.max(0, sv.currentTime - studentTrim) : 0;
+          sv && sv.pause();
+
+          skeletonSec.style.display = 'none';
+          composedSec.style.display = 'block';
+          boneGroup.style.display   = 'none';
+          skeletonBtn.textContent   = 'Show Skeleton';
+
+          const cv = document.getElementById('composedMasterVideo');
+          if (cv) cv.currentTime = seekTo;
+        }
+      });
+    }, 50);
+
+  } else if (studentVideoUrl && teacherVideoUrl) {
+    detailEl.innerHTML =
+      `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">` +
+        `<strong style="font-family:'Syne',sans-serif;font-size:0.82rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted)">Side-by-Side</strong>` +
+        `<div style="display:flex;gap:8px">` +
+          `<button id="teacherOverlayToggle" class="btn btn-small">Hide Teacher Bones</button>` +
+          `<button id="studentOverlayToggle" class="btn btn-small">Hide Student Bones</button>` +
+        `</div>` +
+      `</div>` +
+      _sideBySideHtml(teacherVideoUrl, studentVideoUrl);
+    setTimeout(() => {
+      setupCustomPlayer('masterStudentVideo');
+      const toggleBtn = document.getElementById('teacherOverlayToggle');
+      if (toggleBtn) toggleBtn.addEventListener('click', toggleTeacherOverlay);
+      const toggleStudentBtn = document.getElementById('studentOverlayToggle');
+      if (toggleStudentBtn) toggleStudentBtn.addEventListener('click', toggleStudentOverlay);
+      updateTeacherOverlayButtons();
+      updateStudentOverlayButtons();
+      setupVideoSync('masterStudentVideo', 'masterTeacherVideo', studentTrim, teacherTrim);
+      startPoseOverlay('masterTeacherVideo', 'masterTeacherCanvas', { role:'teacher' });
+      startPoseOverlay('masterStudentVideo', 'masterStudentCanvas', { role:'student' });
+    }, 50);
+  } else {
+    detailEl.innerHTML = '';
+  }
+
+  // Generalized feedback — estimate duration then refine on loadedmetadata
+  const _estDuration = (data.frames || 300) / 30;
+  const _primaryVideo = document.getElementById('composedMasterVideo') ||
+                        document.getElementById('masterStudentVideo');
+  window.activeFeedbackIdx = null;
+
+  function _doRender(dur) {
+    renderGeneralizedFeedback(data.generalized_feedback, dur);
+  }
+
+  if (_primaryVideo) {
+    if (_primaryVideo.readyState >= 1 && _primaryVideo.duration) {
+      _doRender(_primaryVideo.duration);
+    } else {
+      _doRender(_estDuration);
+      _primaryVideo.addEventListener('loadedmetadata', function _onMeta() {
+        _primaryVideo.removeEventListener('loadedmetadata', _onMeta);
+        if (_primaryVideo.duration && _primaryVideo.duration !== _estDuration) {
+          _doRender(_primaryVideo.duration);
+        }
+      });
+    }
+  } else {
+    _doRender(_estDuration);
+  }
+
+  document.getElementById('resultsSection').classList.add('show');
+  document.getElementById('resultsSection').scrollIntoView({ behavior:'smooth' });
+}
+
+window.activeFeedbackIdx = null;
+
+function setupCustomPlayer(videoId) {
+  const video    = document.getElementById(videoId);
+  const playBtn  = document.getElementById(videoId + 'PlayBtn');
+  const timeDisp = document.getElementById(videoId + 'TimeDisplay');
+  const progress = document.getElementById(videoId + 'Progress');
+  const fill     = document.getElementById(videoId + 'Fill');
+  const thumb    = document.getElementById(videoId + 'Thumb');
+  if (!video || !playBtn || !progress) return;
+
+  function _fmt(s) {
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60);
+    return m + ':' + (sec < 10 ? '0' : '') + sec;
+  }
+
+  function _updateBar() {
+    const dur = video.duration || 0;
+    const pct = dur ? (video.currentTime / dur) * 100 : 0;
+    if (fill)  fill.style.width = pct + '%';
+    if (thumb) thumb.style.left = pct + '%';
+    if (timeDisp) timeDisp.textContent = _fmt(video.currentTime) + ' / ' + _fmt(dur);
+  }
+
+  video.addEventListener('timeupdate', _updateBar);
+  video.addEventListener('loadedmetadata', _updateBar);
+
+  playBtn.addEventListener('click', () => {
+    if (video.paused) { video.play().catch(() => {}); playBtn.innerHTML = '&#9646;&#9646;'; }
+    else              { video.pause();                playBtn.innerHTML = '&#9654;'; }
+  });
+  video.addEventListener('play',  () => { playBtn.innerHTML = '&#9646;&#9646;'; });
+  video.addEventListener('pause', () => { playBtn.innerHTML = '&#9654;'; });
+  video.addEventListener('ended', () => { playBtn.innerHTML = '&#9654;'; });
+
+  let _seeking = false;
+  function _seek(e) {
+    const rect = progress.getBoundingClientRect();
+    const pct  = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    if (video.duration) video.currentTime = pct * video.duration;
+  }
+  progress.addEventListener('mousedown', e => { _seeking = true; _seek(e); e.preventDefault(); });
+  document.addEventListener('mousemove', e => { if (_seeking) _seek(e); });
+  document.addEventListener('mouseup',   () => { _seeking = false; });
+}
+
+function renderGeneralizedFeedback(feedback, videoDuration) {
+  const section = document.getElementById('generalizedFeedbackSection');
+  const list    = document.getElementById('generalizedFeedbackList');
+  if (!section || !list) return;
+
+  const dur = videoDuration || 10;
+  list.innerHTML = '';
+  window.activeFeedbackIdx = null;
+
+  if (!feedback || feedback.length === 0) {
+    list.innerHTML = '<div class="feedback-empty">Great work — no major issues detected. Try to push your performance further!</div>';
+    section.style.display = 'block';
+    return;
+  }
+
+  feedback.forEach((item, idx) => {
+    const severityClass =
+      item.severity >= 70 ? 'severity-high' :
+      item.severity >= 40 ? 'severity-med'  : 'severity-low';
+
+    const hasOcc = Array.isArray(item.occurrences) && item.occurrences.length > 0;
+
+    const div = document.createElement('div');
+    div.className = `feedback-item ${severityClass}`;
+    div.dataset.feedbackIdx = idx;
+    div.innerHTML =
+      `<span class="feedback-badge ${item.type}">${item.type}</span>` +
+      `<div class="feedback-content">` +
+        `<div class="feedback-message">${item.message}</div>` +
+        (hasOcc
+          ? `<button class="feedback-toggle" data-idx="${idx}">` +
+              `<span class="toggle-icon">▸</span>` +
+              `<span class="toggle-label">Show on timeline (${item.occurrences.length} moments)</span>` +
+            `</button>`
+          : '') +
+      `</div>`;
+    list.appendChild(div);
+  });
+
+  // Attach toggle handlers
+  list.querySelectorAll('.feedback-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.idx);
+      toggleTimelineMarkers(idx, feedback[idx], dur);
+    });
+  });
+
+  section.style.display = 'block';
+}
+
+function _resetToggleButtons() {
+  const timeline = document.getElementById('videoTimelineMarkers');
+  if (timeline) timeline.innerHTML = '';
+  document.querySelectorAll('.feedback-toggle').forEach(btn => {
+    btn.classList.remove('active');
+    btn.querySelector('.toggle-icon').textContent = '▸';
+    const lbl = btn.querySelector('.toggle-label');
+    if (lbl) lbl.textContent = lbl.textContent.replace('Hide', 'Show');
+  });
+}
+
+function toggleTimelineMarkers(idx, feedbackItem, videoDuration) {
+  const timeline = document.getElementById('videoTimelineMarkers');
+  if (!timeline) return;
+
+  // Same item clicked → clear and deactivate
+  if (window.activeFeedbackIdx === idx) {
+    _resetToggleButtons();
+    window.activeFeedbackIdx = null;
+    return;
+  }
+
+  // Switch to new item
+  _resetToggleButtons();
+
+  // Render markers inside the progress bar's overlay
+  const dur = Math.max(videoDuration || 10, 1);
+  (feedbackItem.occurrences || []).forEach(occ => {
+    const marker = document.createElement('div');
+    marker.className = 'timeline-marker';
+    const leftPct  = (occ.start_time / dur) * 100;
+    const widthPct = Math.max(1.5, ((occ.end_time - occ.start_time) / dur) * 100);
+    marker.style.left  = `${leftPct}%`;
+    marker.style.width = `${widthPct}%`;
+    marker.classList.add(
+      occ.severity >= 70 ? 'marker-high' :
+      occ.severity >= 40 ? 'marker-med'  : 'marker-low'
+    );
+    marker.title = `${occ.start_time}s — severity ${occ.severity}`;
+    marker.addEventListener('click', e => {
+      e.stopPropagation();
+      const video = document.getElementById('composedMasterVideo') ||
+                    document.getElementById('masterStudentVideo');
+      if (video) { video.currentTime = occ.start_time; video.play().catch(() => {}); }
+    });
+    timeline.appendChild(marker);
+  });
+
+  // Activate toggle button
+  const activeBtn = document.querySelector(`.feedback-toggle[data-idx="${idx}"]`);
+  if (activeBtn) {
+    activeBtn.classList.add('active');
+    activeBtn.querySelector('.toggle-icon').textContent = '▾';
+    const lbl = activeBtn.querySelector('.toggle-label');
+    if (lbl) lbl.textContent = lbl.textContent.replace('Show', 'Hide');
+  }
+
+  window.activeFeedbackIdx = idx;
+}
+
+/* ────────────────────────────────────────────────────────────
+   MEDIAPIPE OVERLAY (preserved exactly)
+──────────────────────────────────────────────────────────── */
+function updateTeacherOverlayButtons() {
+  const label = showTeacherOverlay ? 'Hide Teacher Bones' : 'Show Teacher Bones';
+  ['teacherOverlayToggle','viewerTeacherOverlayToggle'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) btn.textContent = label;
+  });
+}
+
+function toggleTeacherOverlay() {
+  showTeacherOverlay = !showTeacherOverlay;
+  updateTeacherOverlayButtons();
+  if (!showTeacherOverlay) {
+    const c = document.getElementById('masterTeacherCanvas');
+    if (c) c.getContext('2d').clearRect(0, 0, c.width, c.height);
+  }
+}
+
+function updateStudentOverlayButtons() {
+  const label = showStudentOverlay ? 'Hide Student Bones' : 'Show Student Bones';
+  const btn = document.getElementById('studentOverlayToggle');
+  if (btn) btn.textContent = label;
+}
+
+function toggleStudentOverlay() {
+  showStudentOverlay = !showStudentOverlay;
+  updateStudentOverlayButtons();
+  if (!showStudentOverlay) {
+    const c = document.getElementById('masterStudentCanvas');
+    if (c) c.getContext('2d').clearRect(0, 0, c.width, c.height);
+  }
+}
+
+function syncOverlayCanvas(videoEl, canvasEl) {
+  if (!videoEl || !canvasEl) return;
+  const rect = videoEl.getBoundingClientRect();
+  const w = Math.max(1, Math.round(rect.width));
+  const h = Math.max(1, Math.round(rect.height));
+  if (canvasEl.width !== w || canvasEl.height !== h) {
+    canvasEl.width  = w;
+    canvasEl.height = h;
+  }
+}
+
+function drawPivotMarkers(ctx, landmarks, role, width, height) {
+  if (!landmarks || !landmarks.length) return;
+  const pivotIds = [11,12,13,14,15,16,23,24,25,26,27,28];
+  const ringColor = role === 'teacher' ? '#1d4ed8' : '#ea580c';
+  const fillColor = role === 'teacher' ? '#93c5fd' : '#fdba74';
+  const radius    = role === 'teacher' ? 4 : 5;
+  ctx.save();
+  for (const idx of pivotIds) {
+    const lm = landmarks[idx];
+    if (!lm) continue;
+    if (typeof lm.visibility === 'number' && lm.visibility < 0.35) continue;
+    const x = lm.x * width, y = lm.y * height;
+    ctx.beginPath(); ctx.arc(x, y, radius + 2, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(255,255,255,0.8)'; ctx.fill();
+    ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI*2);
+    ctx.fillStyle = fillColor; ctx.fill();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = ringColor; ctx.stroke();
+  }
+  ctx.restore();
+}
+
+async function startPoseOverlay(videoId, canvasId, options = {}) {
+  const videoEl  = document.getElementById(videoId);
+  const canvasEl = document.getElementById(canvasId);
+  if (!videoEl || !canvasEl) return;
+  const role = options.role || 'student';
+  const key  = `${videoId}:${canvasId}:${role}`;
+  if (poseOverlaySessions[key]?.stop) poseOverlaySessions[key].stop();
+
+  if (typeof Pose === 'undefined' || typeof drawConnectors === 'undefined') {
+    console.warn('MediaPipe not loaded; skipping overlay.');
+    return;
+  }
+
+  syncOverlayCanvas(videoEl, canvasEl);
+  const ctx  = canvasEl.getContext('2d');
+  const pose = new Pose({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${f}` });
+  pose.setOptions({ modelComplexity:0, smoothLandmarks:true, enableSegmentation:false,
+    minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
+  pose.onResults(results => {
+    syncOverlayCanvas(videoEl, canvasEl);
+    ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+    if (!results || !results.poseLandmarks) return;
+    if (role === 'teacher' && !showTeacherOverlay) return;
+    if (role === 'student' && !showStudentOverlay) return;
+    const lineColor  = role === 'teacher' ? '#60a5fa' : '#22c55e';
+    const pointColor = role === 'teacher' ? '#2563eb' : '#f97316';
+    const lineWidth  = role === 'teacher' ? 2 : 3;
+    const radius     = role === 'teacher' ? 2 : 3;
+    ctx.save();
+    drawConnectors(ctx, results.poseLandmarks, POSE_CONNECTIONS, { color:lineColor, lineWidth });
+    drawLandmarks(ctx, results.poseLandmarks, { color:pointColor, radius });
+    drawPivotMarkers(ctx, results.poseLandmarks, role, canvasEl.width, canvasEl.height);
+    ctx.restore();
+  });
+
+  let rafId = null, running = false, busy = false, lastTs = 0;
+  const loop = async (ts) => {
+    if (!running) return;
+    if (videoEl.paused || videoEl.ended || videoEl.readyState < 2) {
+      rafId = requestAnimationFrame(loop); return;
+    }
+    if (busy || ts - lastTs < 66) { rafId = requestAnimationFrame(loop); return; }
+    busy = true; lastTs = ts;
+    try { await pose.send({ image: videoEl }); } catch(e) { console.warn('Overlay frame err:', e); }
+    busy = false;
+    rafId = requestAnimationFrame(loop);
+  };
+  const start  = () => { if (running) return; running = true; rafId = requestAnimationFrame(loop); };
+  const pause  = () => { running = false; if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; } };
+  const onResize = () => syncOverlayCanvas(videoEl, canvasEl);
+  videoEl.addEventListener('play', start);
+  videoEl.addEventListener('pause', pause);
+  videoEl.addEventListener('ended', pause);
+  videoEl.addEventListener('loadedmetadata', onResize);
+  window.addEventListener('resize', onResize);
+  if (!videoEl.paused && !videoEl.ended) start();
+  poseOverlaySessions[key] = {
+    stop: () => {
+      pause();
+      videoEl.removeEventListener('play', start);
+      videoEl.removeEventListener('pause', pause);
+      videoEl.removeEventListener('ended', pause);
+      videoEl.removeEventListener('loadedmetadata', onResize);
+      window.removeEventListener('resize', onResize);
+      canvasEl.getContext('2d').clearRect(0,0,canvasEl.width,canvasEl.height);
+    }
+  };
+}
+
+/* ────────────────────────────────────────────────────────────
+   VIDEO SYNC (preserved exactly)
+──────────────────────────────────────────────────────────── */
+function setupVideoSync(studentVideoId, teacherVideoId, studentTrim = 0, teacherTrim = 0) {
+  const sv = document.getElementById(studentVideoId);
+  const tv = document.getElementById(teacherVideoId);
+  if (!sv || !tv) return;
+  const key = `${studentVideoId}:${teacherVideoId}`;
+  if (syncPairSessions[key]?.stop) syncPairSessions[key].stop();
+  const delta = Number(teacherTrim || 0) - Number(studentTrim || 0);
+  let syncing = false;
+  const syncTeacher = () => {
+    if (syncing) return; syncing = true;
+    const target = Math.max(0, (sv.currentTime || 0) + delta);
+    const drift  = (tv.currentTime || 0) - target;
+    if (Math.abs(drift) > 0.25) {
+      tv.currentTime = target; tv.playbackRate = sv.playbackRate || 1;
+    } else {
+      const base = sv.playbackRate || 1;
+      const corr = Math.max(-0.08, Math.min(0.08, -drift * 0.6));
+      tv.playbackRate = Math.max(0.8, Math.min(1.25, base + corr));
+    }
+    syncing = false;
+  };
+  const onPlay  = () => { syncTeacher(); tv.play().catch(()=>{}); };
+  const onPause = () => tv.pause();
+  const onSeek  = () => syncTeacher();
+  let timerId = null;
+  const startTimer = () => { if (timerId !== null) return; timerId = setInterval(syncTeacher, 120); };
+  const stopTimer  = () => { if (timerId !== null) { clearInterval(timerId); timerId = null; } };
+  sv.addEventListener('play', onPlay); sv.addEventListener('pause', onPause);
+  sv.addEventListener('seeking', onSeek); sv.addEventListener('seeked', onSeek);
+  sv.addEventListener('ratechange', onSeek);
+  tv.addEventListener('loadedmetadata', syncTeacher);
+  sv.addEventListener('play', startTimer); sv.addEventListener('pause', stopTimer); sv.addEventListener('ended', stopTimer);
+  syncTeacher();
+  syncPairSessions[key] = {
+    stop: () => {
+      stopTimer();
+      sv.removeEventListener('play', onPlay); sv.removeEventListener('pause', onPause);
+      sv.removeEventListener('seeking', onSeek); sv.removeEventListener('seeked', onSeek);
+      sv.removeEventListener('ratechange', onSeek);
+      tv.removeEventListener('loadedmetadata', syncTeacher);
+      sv.removeEventListener('play', startTimer); sv.removeEventListener('pause', stopTimer); sv.removeEventListener('ended', stopTimer);
+    }
+  };
+}
+
+/* ────────────────────────────────────────────────────────────
+   TIMELINE MARKERS
+──────────────────────────────────────────────────────────── */
+function fmtTime(sec) {
+  const s = Math.max(0, Math.round(sec));
+  return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+}
+
+
+
+/* ────────────────────────────────────────────────────────────
+   EVENT SETUP & INIT
+──────────────────────────────────────────────────────────── */
+function setupEventListeners() {
+  // Screen 1
+  document.getElementById('continueBtn').addEventListener('click', () => {
+    if (selectedMovement) showScreen(2);
+  });
+
+  // Screen 2 top bar
+  document.getElementById('backBtn').addEventListener('click', () => showScreen(1));
+
+  // Student upload — btn opens file picker if no file yet; grades if file already selected
+  setupDropzone('studentUpload', 'studentFile', file => {
+    showStartMarkerPanel(file);
+    uploadStudent._pendingFile = file;
+  });
+
+  // Start marker panel controls
+  (function() {
+    window._studentStartOffset = 0;
+    const panel    = document.getElementById('startMarkerPanel');
+    const vid      = document.getElementById('startMarkerVideo');
+    const playBtn  = document.getElementById('smcPlayBtn');
+    const setBtn   = document.getElementById('smcSetBtn');
+    const resetBtn = document.getElementById('smcResetBtn');
+    const timeEl   = document.getElementById('smcTime');
+    const tagEl    = document.getElementById('smcStartTag');
+
+    function fmtT(s) {
+      s = Math.max(0, Math.round(s));
+      return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+    }
+
+    vid.addEventListener('timeupdate', () => { timeEl.textContent = fmtT(vid.currentTime); });
+    playBtn.addEventListener('click', () => {
+      if (vid.paused) { vid.play(); playBtn.innerHTML = '&#9646;&#9646;'; }
+      else            { vid.pause(); playBtn.innerHTML = '&#9654;'; }
+    });
+    vid.addEventListener('ended', () => { playBtn.innerHTML = '&#9654;'; });
+
+    setBtn.addEventListener('click', () => {
+      window._studentStartOffset = vid.currentTime;
+      tagEl.textContent = fmtT(vid.currentTime);
+      tagEl.classList.remove('auto');
+    });
+    resetBtn.addEventListener('click', () => {
+      window._studentStartOffset = 0;
+      tagEl.textContent = 'auto-detect';
+      tagEl.classList.add('auto');
+    });
+  })();
+
+  function showStartMarkerPanel(file) {
+    const panel = document.getElementById('startMarkerPanel');
+    const vid   = document.getElementById('startMarkerVideo');
+    window._studentStartOffset = 0;
+    document.getElementById('smcStartTag').textContent = 'auto-detect';
+    document.getElementById('smcStartTag').classList.add('auto');
+    document.getElementById('smcTime').textContent = '0:00';
+    document.getElementById('smcPlayBtn').innerHTML = '&#9654;';
+    vid.src = URL.createObjectURL(file);
+    vid.currentTime = 0;
+    panel.classList.add('visible');
+  }
+
+  document.getElementById('studentBtn').addEventListener('click', () => {
+    if (uploadStudent._pendingFile) {
+      uploadStudent(uploadStudent._pendingFile);
+    } else {
+      document.getElementById('studentFile').click();
+    }
+  });
+
+  // Grade another
+  document.getElementById('gradeAnotherBtn').addEventListener('click', resetStudentSection);
+
+  // Clear history
+  document.getElementById('clearHistoryBtn').addEventListener('click', async () => {
+    if (!confirm('Clear all grading history?')) return;
+    await fetch('/api/clear-history', { method:'POST' });
+    window.historyItems = [];
+    document.getElementById('historyList').innerHTML = '<div class="empty-msg">No grading history yet</div>';
+    loadStatus();
+  });
+
+  updateTeacherOverlayButtons();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  buildMovementCards();
+  setupEventListeners();
+  loadStatus();
+
+  // Restore session state on refresh
+  const savedMovement = sessionStorage.getItem('dgs_movement');
+  const savedScreen   = sessionStorage.getItem('dgs_screen');
+  if (savedMovement && MOVEMENTS[savedMovement]) {
+    const card = document.querySelector(`.mv-card[data-key="${savedMovement}"]`);
+    if (card) selectMovement(savedMovement, card);
+  }
+  if (savedScreen === '2' && savedMovement) {
+    // Skip animation — directly swap screens then load data
+    document.getElementById('screen1').classList.add('screen-hidden');
+    document.getElementById('screen1').classList.remove('screen-active');
+    document.getElementById('screen2').classList.remove('screen-hidden');
+    document.getElementById('screen2').classList.add('screen-active');
+    updateTopbar();
+    loadStatus();
+    loadHistory();
+    loadReferenceVideo(savedMovement);
+  }
+});
+
+console.log('✓ DGS loaded');
+</script>
 </body>
 </html>

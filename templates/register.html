@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Register — Dance Grading System</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:       #0a0a0c;
+      --surface:  #111116;
+      --surface2: #18181f;
+      --surface3: #222230;
+      --border:   #2a2a3a;
+      --border2:  #3d3d52;
+      --text:     #e8e8f2;
+      --muted:    #6b6b85;
+      --accent:   #7c6af7;
+      --accent2:  #a594f9;
+      --green:    #22c55e;
+      --red:      #ef4444;
+    }
+
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'DM Mono', monospace;
+      font-size: 14px;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    h1, h2, h3 { font-family: 'Syne', sans-serif; }
+
+    .auth-card {
+      width: 100%;
+      max-width: 400px;
+      padding: 48px 40px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      margin: 24px;
+    }
+
+    .logo {
+      font-family: 'Syne', sans-serif;
+      font-size: 1.6rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 4px;
+    }
+    .logo span { color: var(--accent); }
+
+    .tagline {
+      font-size: 0.72rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 36px;
+    }
+
+    h2 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      margin-bottom: 24px;
+      color: var(--text);
+    }
+
+    .flash-msg {
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 0.8rem;
+      margin-bottom: 20px;
+      border: 1px solid;
+    }
+    .flash-msg.error {
+      background: rgba(239,68,68,0.08);
+      border-color: rgba(239,68,68,0.3);
+      color: #f87171;
+    }
+
+    .field {
+      margin-bottom: 18px;
+    }
+
+    label {
+      display: block;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    input[type="email"],
+    input[type="password"],
+    input[type="text"] {
+      width: 100%;
+      padding: 11px 14px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: 'DM Mono', monospace;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input:focus {
+      border-color: var(--accent);
+    }
+    input.field-error {
+      border-color: var(--red);
+    }
+
+    .field-errors {
+      margin-top: 5px;
+      font-size: 0.72rem;
+      color: #f87171;
+    }
+
+    .pw-hint {
+      margin-top: 5px;
+      font-size: 0.7rem;
+      color: var(--muted);
+    }
+
+    .btn-submit {
+      width: 100%;
+      padding: 13px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-family: 'Syne', sans-serif;
+      font-size: 0.9rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+      margin-top: 6px;
+      margin-bottom: 20px;
+    }
+    .btn-submit:hover  { opacity: 0.88; }
+    .btn-submit:active { transform: scale(0.98); }
+    .btn-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .alt-link {
+      text-align: center;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+    .alt-link a {
+      color: var(--accent2);
+      text-decoration: none;
+    }
+    .alt-link a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+<div class="auth-card">
+  <div class="logo">DG<span>S</span></div>
+  <div class="tagline">Hip Hop Dance Grading System</div>
+
+  <h2>Create account</h2>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <div class="flash-msg {{ category }}">{{ message }}</div>
+    {% endfor %}
+  {% endwith %}
+
+  <form method="POST" novalidate id="registerForm">
+    {{ form.hidden_tag() }}
+
+    <div class="field">
+      <label for="full_name">Full Name</label>
+      {{ form.full_name(id='full_name', placeholder='Coach / Instructor name',
+          class='field-error' if form.full_name.errors else '') }}
+      {% if form.full_name.errors %}
+        <div class="field-errors">{{ form.full_name.errors[0] }}</div>
+      {% endif %}
+    </div>
+
+    <div class="field">
+      <label for="email">Email</label>
+      {{ form.email(id='email', placeholder='you@example.com',
+          class='field-error' if form.email.errors else '') }}
+      {% if form.email.errors %}
+        <div class="field-errors">{{ form.email.errors[0] }}</div>
+      {% endif %}
+    </div>
+
+    <div class="field">
+      <label for="password">Password</label>
+      {{ form.password(id='password', placeholder='Min. 8 characters',
+          class='field-error' if form.password.errors else '') }}
+      {% if form.password.errors %}
+        <div class="field-errors">{{ form.password.errors[0] }}</div>
+      {% else %}
+        <div class="pw-hint">At least 8 characters</div>
+      {% endif %}
+    </div>
+
+    <div class="field">
+      <label for="confirm">Confirm Password</label>
+      {{ form.confirm(id='confirm', placeholder='Repeat password',
+          class='field-error' if form.confirm.errors else '') }}
+      {% if form.confirm.errors %}
+        <div class="field-errors">{{ form.confirm.errors[0] }}</div>
+      {% endif %}
+    </div>
+
+    <button type="submit" class="btn-submit" id="submitBtn">Create account</button>
+  </form>
+
+  <div class="alt-link">
+    Already have an account? <a href="{{ url_for('auth.login') }}">Sign in</a>
+  </div>
+</div>
+
+<script>
+  document.getElementById('registerForm').addEventListener('submit', function() {
+    const btn = document.getElementById('submitBtn');
+    btn.disabled = true;
+    btn.textContent = 'Creating account…';
+  });
+</script>
+</body>
+</html>
